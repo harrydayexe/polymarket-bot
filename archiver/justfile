@@ -1,0 +1,51 @@
+set shell := ["bash", "-euo", "pipefail", "-c"]
+
+# Build a debug binary
+[group("build")]
+[default]
+build:
+    cargo build
+
+# Build an optimised release binary
+[group("build")]
+build-release:
+    cargo build --release
+
+# Type-check without producing a binary
+[group("build")]
+check:
+    cargo check --all-targets
+
+# Delete build artifacts
+[group("build")]
+clean:
+    cargo clean
+
+# Run the test suite, forwarding extra args to cargo test
+[group("test")]
+test *args:
+    cargo test {{ args }}
+
+# Lint with clippy, treating warnings as errors
+[group("lint")]
+lint:
+    cargo clippy --all-targets -- -D warnings
+
+# Format all code
+[group("lint")]
+fmt:
+    cargo fmt
+
+# Check formatting without modifying files
+[group("lint")]
+fmt-check:
+    cargo fmt --check
+
+# Run the archiver CLI, e.g. `just run check` or `just run gaps --help`
+[group("run")]
+run *args:
+    cargo run -- {{ args }}
+
+# Run all CI checks: formatting, lints and tests
+[group("ci")]
+ci: fmt-check lint test
