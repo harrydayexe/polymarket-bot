@@ -1,5 +1,6 @@
 mod cli;
 mod commands;
+mod market_registry;
 
 use clap::Parser;
 use cli::Cli;
