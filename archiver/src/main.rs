@@ -3,6 +3,7 @@ mod clock;
 mod commands;
 mod config;
 mod connections;
+mod envelope;
 mod market_registry;
 mod types;
 

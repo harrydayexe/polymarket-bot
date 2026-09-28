@@ -7,32 +7,32 @@ use tokio::time::Instant;
 
 /// A type identifying tokens. This is a very long decimal number but is stored
 /// as a string as it overflows 64-bit integers.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenId(pub String);
 
 /// A type containing a hexadecimal market identifier.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConditionId(pub String);
 
 /// A type containing a per-run identifer, created once per process start.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunId(pub String);
 
 /// A type identifying a connection slot that is stable across re-connects.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnSlotId(pub String);
 
 /// A type identifying attempts to a particular connection.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnAttemptId(pub String);
 
 /// A type containing a price or size exactly as the exchange sent it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecimalString(pub String);
 
 /// Wall-clock time, in microseconds since the UNIX epoch. Used when writing to
 /// disk.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UtcMicros(pub i64);
 
 /// A monotonic clock time, used only for timers and durations. Should never be
@@ -41,11 +41,11 @@ pub struct UtcMicros(pub i64);
 pub struct MonoTime(pub Instant);
 
 /// The timestamps received exactly as they are from the exchange.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExchangeMillis(pub String);
 
 /// A type containing a per-process record counter.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Seq(pub i64);
 
 /// A type giving the reason for a snapshot request
