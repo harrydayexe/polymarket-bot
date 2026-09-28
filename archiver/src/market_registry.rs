@@ -1,4 +1,4 @@
 mod market_info;
+mod parse_gamma_page;
 pub mod registry;
-mod registry_functions;
 mod tracked_market;
