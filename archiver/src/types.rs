@@ -27,7 +27,7 @@ pub struct ConnSlotId(pub String);
 pub struct ConnAttemptId(pub String);
 
 /// A type containing a price or size exactly as the exchange sent it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DecimalString(pub String);
 
 /// Wall-clock time, in microseconds since the UNIX epoch. Used when writing to

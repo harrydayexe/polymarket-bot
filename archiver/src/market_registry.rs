@@ -1,3 +1,4 @@
-pub mod market_info;
+mod market_info;
 pub mod registry;
-pub mod tracked_market;
+mod registry_functions;
+mod tracked_market;
