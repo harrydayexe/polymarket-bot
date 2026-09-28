@@ -7,7 +7,7 @@ use tokio::time::Instant;
 
 /// A type identifying tokens. This is a very long decimal number but is stored
 /// as a string as it overflows 64-bit integers.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub struct TokenId(pub String);
 
 /// A type containing a hexadecimal market identifier.
@@ -32,7 +32,7 @@ pub struct DecimalString(pub String);
 
 /// Wall-clock time, in microseconds since the UNIX epoch. Used when writing to
 /// disk.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct UtcMicros(pub i64);
 
 /// A monotonic clock time, used only for timers and durations. Should never be
