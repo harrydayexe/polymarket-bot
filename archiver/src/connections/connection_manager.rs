@@ -5,6 +5,7 @@ use crate::{
     types::{ConnSlotId, TokenId, UtcMicros},
 };
 
+#[derive(Debug)]
 pub struct ConnectionManager {
     /// Map of connections to their slot ID.
     connections: HashMap<ConnSlotId, Connection>,

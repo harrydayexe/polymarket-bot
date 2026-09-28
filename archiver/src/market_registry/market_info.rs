@@ -1,6 +1,6 @@
 use crate::types::{ConditionId, DecimalString, TokenId, UtcMicros};
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct MarketInfo {
     condition_id: ConditionId,
     question: String,

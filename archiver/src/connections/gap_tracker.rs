@@ -3,11 +3,13 @@ use std::collections::{HashMap, HashSet};
 use crate::types::{ControlBody, GapReason, TokenId, UtcMicros};
 
 /// An object describing an open gap in data.
+#[derive(Debug, Clone)]
 pub struct OpenGap {
     start: UtcMicros,
     reason: GapReason,
 }
 
+#[derive(Debug)]
 pub struct GapTracker {
     open_gaps: HashMap<TokenId, OpenGap>,
 }

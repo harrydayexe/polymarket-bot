@@ -4,7 +4,7 @@ use crate::types::{
     ConnAttemptId, ConnSlotId, ControlBody, GapReason, MonoTime, SnapshotReason, TokenId, UtcMicros,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Connection {
     slot_id: ConnSlotId,
     /// Absent before the first attempt.
@@ -32,7 +32,7 @@ enum ConnState {
     Closed,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum ConnAction {
     OpenSocket {
         url: String,

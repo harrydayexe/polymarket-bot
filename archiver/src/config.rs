@@ -17,7 +17,7 @@ pub struct Config {
     pub backoff_max_s: u64,
     pub snapshot_interval_min: u64,
     pub snapshot_batch_size: usize,
-    pub snapshot_max_requests_per_s: u32,
+    pub snapshot_max_requests_per_s: u64,
     pub write_queue_capacity: usize,
     pub flush_interval_s: u64,
     pub sync_interval_s: u64,

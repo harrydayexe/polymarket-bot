@@ -37,8 +37,7 @@ pub struct UtcMicros(pub i64);
 
 /// A monotonic clock time, used only for timers and durations. Should never be
 /// written to disk.
-#[derive(Debug, Clone)]
-pub struct MonoTime(pub Instant);
+pub type MonoTime = Instant;
 
 /// The timestamps received exactly as they are from the exchange.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,7 +71,7 @@ pub enum GapReason {
     Resumed,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum ControlBody {
     RunStart {
         program_version: String,
