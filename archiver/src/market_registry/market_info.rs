@@ -1,11 +1,10 @@
-use crate::market_registry::types::{ConditionId, DecimalString, TokenId, UtcMicros};
+use crate::types::{ConditionId, DecimalString, TokenId, UtcMicros};
 
 #[derive(Debug, Clone)]
 pub struct MarketInfo {
     condition_id: ConditionId,
     question: String,
     slug: String,
-    website: String,
     event_id: Option<String>,
     tags: Vec<String>,
     yes_token: TokenId,

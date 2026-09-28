@@ -1,4 +1,5 @@
-use crate::market_registry::{market_info::MarketInfo, types::UtcMicros};
+use crate::market_registry::market_info::MarketInfo;
+use crate::types::UtcMicros;
 
 #[derive(Debug, Clone)]
 pub struct TrackedMarket {
