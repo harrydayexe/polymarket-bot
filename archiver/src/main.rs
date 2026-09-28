@@ -1,6 +1,7 @@
 mod cli;
 mod clock;
 mod commands;
+mod config;
 mod connections;
 mod market_registry;
 mod types;
