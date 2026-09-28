@@ -1,4 +1,5 @@
 mod cli;
+mod clock;
 mod commands;
 mod connections;
 mod market_registry;
@@ -7,7 +8,8 @@ mod types;
 use clap::Parser;
 use cli::Cli;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let cli = Cli::parse();
     let _ = commands::dispatch(cli);
 }

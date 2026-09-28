@@ -2,7 +2,8 @@
 //! Defined here so that if the type changes, its all in one place.
 
 use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, time::Instant};
+use std::collections::HashSet;
+use tokio::time::Instant;
 
 /// A type identifying tokens. This is a very long decimal number but is stored
 /// as a string as it overflows 64-bit integers.
