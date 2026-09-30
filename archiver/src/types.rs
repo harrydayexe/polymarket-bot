@@ -3,7 +3,11 @@
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, str::FromStr};
+use std::{
+    collections::HashSet,
+    str::FromStr,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tokio::time::Instant;
 
 /// A type identifying tokens. This is a very long decimal number but is stored
@@ -19,6 +23,11 @@ impl From<String> for TokenId {
 /// A type containing a hexadecimal market identifier.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ConditionId(pub String);
+impl From<String> for ConditionId {
+    fn from(value: String) -> Self {
+        ConditionId(value)
+    }
+}
 
 /// A type containing a per-run identifer, created once per process start.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,7 +58,7 @@ impl From<Decimal> for DecimalString {
 
 /// Wall-clock time, in microseconds since the UNIX epoch. Used when writing to
 /// disk.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct UtcMicros(pub i64);
 
 /// A monotonic clock time, used only for timers and durations. Should never be

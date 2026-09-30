@@ -11,7 +11,7 @@ pub struct Config {
     pub category_tags: Vec<String>,
     pub min_liquidity_usd: Decimal,
     pub registry_interval_s: u64,
-    pub closed_grace_period_h: u64,
+    pub closed_grace_period_h: i64,
     pub tokens_per_connection: usize,
     pub heartbeat_interval_s: u64,
     pub heartbeat_timeout_s: u64,
@@ -99,6 +99,12 @@ impl Config {
         }
 
         ensure!(
+            self.closed_grace_period_h >= 0,
+            "closed_grace_period_h must be a non-negative number, got {}",
+            self.closed_grace_period_h
+        );
+
+        ensure!(
             self.min_liquidity_usd >= Decimal::ZERO,
             "min_liquidity_usd must be a non-negative number, got {}",
             self.min_liquidity_usd
@@ -151,6 +157,7 @@ impl Config {
 mod tests {
     use super::*;
 
+    /// Unwrap config parsing error for a line of config
     fn err(text: &str) -> String {
         format!("{:#}", Config::from_toml_str(text).unwrap_err())
     }
@@ -189,6 +196,12 @@ mod tests {
             msg.contains("registry_interval_s must be greater than 0"),
             "{msg}"
         );
+    }
+
+    #[test]
+    fn negative_grace_is_refused() {
+        let msg = err("closed_grace_period_h = -5");
+        assert!(msg.contains("closed_grace_period_h"), "{msg}");
     }
 
     #[test]

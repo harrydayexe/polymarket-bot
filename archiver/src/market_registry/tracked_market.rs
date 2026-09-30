@@ -1,19 +1,24 @@
 use crate::market_registry::market_info::MarketInfo;
 use crate::types::UtcMicros;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TrackedMarket {
-    info: MarketInfo,
-    added_at: UtcMicros,
-    status: MarketStatus,
+    pub info: MarketInfo,
+    pub added_at: UtcMicros,
+    pub status: MarketStatus,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-enum MarketStatus {
+#[derive(Debug, PartialEq, Clone)]
+pub enum MarketStatus {
     Tracking,
     Closing {
         grace_until: UtcMicros,
-        cause: String,
+        cause: ClosingCause,
     },
-    ResolvedOnWebsocket,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum ClosingCause {
+    ClosedOnGamma,
+    ClosedOnWebSocket,
 }
