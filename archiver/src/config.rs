@@ -1,4 +1,6 @@
 use anyhow::{Context, bail, ensure};
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -7,7 +9,7 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub archive_dir: PathBuf,
     pub category_tags: Vec<String>,
-    pub min_liquidity_usd: f64,
+    pub min_liquidity_usd: Decimal,
     pub registry_interval_s: u64,
     pub closed_grace_period_h: u64,
     pub tokens_per_connection: usize,
@@ -34,7 +36,7 @@ impl Default for Config {
         Self {
             archive_dir: "./archive".into(),
             category_tags: vec!["politics".into(), "geopolitics".into()],
-            min_liquidity_usd: 1_000.0,
+            min_liquidity_usd: dec!(1000),
             registry_interval_s: 60,
             closed_grace_period_h: 6,
             tokens_per_connection: 250,
@@ -97,7 +99,7 @@ impl Config {
         }
 
         ensure!(
-            self.min_liquidity_usd.is_finite() && self.min_liquidity_usd >= 0.0,
+            self.min_liquidity_usd >= Decimal::ZERO,
             "min_liquidity_usd must be a non-negative number, got {}",
             self.min_liquidity_usd
         );

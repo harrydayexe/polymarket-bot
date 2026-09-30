@@ -1,17 +1,23 @@
 //! Custom types for interacting with the PolyMarket API and state machines.
 //! Defined here so that if the type changes, its all in one place.
 
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::{collections::HashSet, str::FromStr};
 use tokio::time::Instant;
 
 /// A type identifying tokens. This is a very long decimal number but is stored
 /// as a string as it overflows 64-bit integers.
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub struct TokenId(pub String);
+impl From<String> for TokenId {
+    fn from(value: String) -> Self {
+        TokenId(value)
+    }
+}
 
 /// A type containing a hexadecimal market identifier.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ConditionId(pub String);
 
 /// A type containing a per-run identifer, created once per process start.
@@ -29,6 +35,17 @@ pub struct ConnAttemptId(pub String);
 /// A type containing a price or size exactly as the exchange sent it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DecimalString(pub String);
+impl DecimalString {
+    /// Parse the decimal string or return an error
+    pub fn as_decimal(&self) -> Result<Decimal, rust_decimal::Error> {
+        Decimal::from_str(&self.0)
+    }
+}
+impl From<Decimal> for DecimalString {
+    fn from(value: Decimal) -> Self {
+        DecimalString(value.to_string())
+    }
+}
 
 /// Wall-clock time, in microseconds since the UNIX epoch. Used when writing to
 /// disk.
