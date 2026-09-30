@@ -6,3 +6,4 @@ mod select;
 #[cfg(test)]
 mod test_support;
 mod tracked_market;
+pub mod update_from_gamma;
