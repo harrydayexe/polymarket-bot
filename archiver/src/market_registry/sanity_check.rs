@@ -32,4 +32,14 @@ mod tests {
     fn just_above_threshold() {
         assert!(sanity_check(151, 300));
     }
+
+    #[test]
+    fn empty_response_with_300_tracked_is_rejected() {
+        assert!(!sanity_check(0, 300));
+    }
+
+    #[test]
+    fn rejects_140_of_300() {
+        assert!(!sanity_check(140, 300));
+    }
 }

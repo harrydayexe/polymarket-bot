@@ -261,4 +261,19 @@ mod tests {
         assert!(parse_gamma_page(r#"{"error":"rate limited"}"#, T).is_err());
         assert!(parse_gamma_page("not json", T).is_err());
     }
+
+    #[test]
+    fn malformed_market_does_not_affect_others() {
+        let page = r#"[
+          {"id":"1","conditionId":"0x1","outcomes":"[\"Yes\",\"No\"]","orderPriceMinTickSize":0.01},
+          {"id":"2","conditionId":"0x2","clobTokenIds":"[\"A\"]","outcomes":"[\"Yes\"]","orderPriceMinTickSize":0.01},
+          {"id":"3","conditionId":"0x3","clobTokenIds":"[\"A\",\"B\"]","outcomes":"[\"Yes\",\"No\"]","orderPriceMinTickSize":0.01}
+        ]"#;
+        let (m, s) = parse_gamma_page(page, T).unwrap();
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].condition_id, ConditionId("0x3".into()));
+        assert_eq!(s.len(), 2);
+        assert_eq!(s[0].id, "0x1");
+        assert_eq!(s[1].id, "0x2");
+    }
 }
