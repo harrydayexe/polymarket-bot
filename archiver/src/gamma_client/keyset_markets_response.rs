@@ -1,0 +1,440 @@
+//! Serde models for `GET https://gamma-api.polymarket.com/markets/keyset` (200 response).
+//!
+//! Notes:
+//! - Every field is `Option` / `#[serde(default)]` so missing or `null` values never fail decoding.
+//! - Fields the spec marks `format: date-time` use `chrono::DateTime<Utc>`; date-like fields
+//!   typed as plain strings in the spec stay `String`.
+//! - `outcomes`, `outcome_prices`, `clob_token_ids` are JSON-encoded arrays inside a string;
+//!   see `Market::parse_string_array`.
+
+use chrono::{DateTime, Utc};
+use serde::Deserialize;
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct KeysetMarketsResponse {
+    pub markets: Vec<Market>,
+    /// Absent on the last page.
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Market {
+    pub id: String,
+    pub question: Option<String>,
+    pub condition_id: String,
+    pub slug: Option<String>,
+    pub twitter_card_image: Option<String>,
+    pub resolution_source: Option<String>,
+    pub end_date: Option<DateTime<Utc>>,
+    pub category: Option<String>,
+    pub liquidity: Option<String>,
+    pub sponsor_name: Option<String>,
+    pub sponsor_image: Option<String>,
+    pub start_date: Option<DateTime<Utc>>,
+    pub x_axis_value: Option<String>,
+    pub y_axis_value: Option<String>,
+    pub denomination_token: Option<String>,
+    pub fee: Option<String>,
+    pub image: Option<String>,
+    pub icon: Option<String>,
+    pub lower_bound: Option<String>,
+    pub upper_bound: Option<String>,
+    pub description: Option<String>,
+    pub outcomes: Option<String>,
+    pub outcome_prices: Option<String>,
+    pub volume: Option<String>,
+    pub active: Option<bool>,
+    pub market_type: Option<String>,
+    pub format_type: Option<String>,
+    pub lower_bound_date: Option<String>,
+    pub upper_bound_date: Option<String>,
+    pub closed: Option<bool>,
+    pub created_by: Option<i64>,
+    pub updated_by: Option<i64>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
+    pub closed_time: Option<String>,
+    pub wide_format: Option<bool>,
+    pub new: Option<bool>,
+    pub mailchimp_tag: Option<String>,
+    pub featured: Option<bool>,
+    pub archived: Option<bool>,
+    pub resolved_by: Option<String>,
+    pub restricted: Option<bool>,
+    pub market_group: Option<i64>,
+    pub group_item_title: Option<String>,
+    pub group_item_threshold: Option<String>,
+    #[serde(rename = "questionID")]
+    pub question_id: Option<String>,
+    pub uma_end_date: Option<String>,
+    pub enable_order_book: Option<bool>,
+    pub order_price_min_tick_size: Option<f64>,
+    pub order_min_size: Option<f64>,
+    pub uma_resolution_status: Option<String>,
+    pub curation_order: Option<i64>,
+    pub volume_num: Option<f64>,
+    pub liquidity_num: Option<f64>,
+    pub end_date_iso: Option<String>,
+    pub start_date_iso: Option<String>,
+    pub uma_end_date_iso: Option<String>,
+    pub has_reviewed_dates: Option<bool>,
+    pub ready_for_cron: Option<bool>,
+    pub comments_enabled: Option<bool>,
+    pub volume_24hr: Option<f64>,
+    pub volume_1wk: Option<f64>,
+    pub volume_1mo: Option<f64>,
+    pub volume_1yr: Option<f64>,
+    pub game_start_time: Option<String>,
+    pub seconds_delay: Option<i64>,
+    pub clob_token_ids: Option<String>,
+    pub disqus_thread: Option<String>,
+    pub short_outcomes: Option<String>,
+    #[serde(rename = "teamAID")]
+    pub team_a_id: Option<String>,
+    #[serde(rename = "teamBID")]
+    pub team_b_id: Option<String>,
+    pub uma_bond: Option<String>,
+    pub uma_reward: Option<String>,
+    pub volume_24hr_clob: Option<f64>,
+    pub volume_1wk_clob: Option<f64>,
+    pub volume_1mo_clob: Option<f64>,
+    pub volume_1yr_clob: Option<f64>,
+    pub volume_clob: Option<f64>,
+    pub liquidity_clob: Option<f64>,
+    pub maker_base_fee: Option<i64>,
+    pub taker_base_fee: Option<i64>,
+    pub custom_liveness: Option<i64>,
+    pub accepting_orders: Option<bool>,
+    pub notifications_enabled: Option<bool>,
+    pub score: Option<i64>,
+    pub image_optimized: Option<ImageOptimization>,
+    pub icon_optimized: Option<ImageOptimization>,
+    pub events: Option<Vec<Event>>,
+    pub categories: Option<Vec<Category>>,
+    /// Only populated when `include_tag=true`.
+    pub tags: Option<Vec<Tag>>,
+    pub creator: Option<String>,
+    pub ready: Option<bool>,
+    pub funded: Option<bool>,
+    pub past_slugs: Option<String>,
+    pub ready_timestamp: Option<DateTime<Utc>>,
+    pub funded_timestamp: Option<DateTime<Utc>>,
+    pub accepting_orders_timestamp: Option<DateTime<Utc>>,
+    pub competitive: Option<f64>,
+    pub rewards_min_size: Option<f64>,
+    pub rewards_max_spread: Option<f64>,
+    pub spread: Option<f64>,
+    pub automatically_resolved: Option<bool>,
+    pub one_day_price_change: Option<f64>,
+    pub one_hour_price_change: Option<f64>,
+    pub one_week_price_change: Option<f64>,
+    pub one_month_price_change: Option<f64>,
+    pub one_year_price_change: Option<f64>,
+    pub last_trade_price: Option<f64>,
+    pub best_bid: Option<f64>,
+    pub best_ask: Option<f64>,
+    pub automatically_active: Option<bool>,
+    pub clear_book_on_start: Option<bool>,
+    pub chart_color: Option<String>,
+    pub series_color: Option<String>,
+    pub show_gmp_series: Option<bool>,
+    pub show_gmp_outcome: Option<bool>,
+    pub manual_activation: Option<bool>,
+    pub neg_risk_other: Option<bool>,
+    pub game_id: Option<String>,
+    pub group_item_range: Option<String>,
+    pub sports_market_type: Option<String>,
+    pub line: Option<f64>,
+    pub uma_resolution_statuses: Option<String>,
+    pub pending_deployment: Option<bool>,
+    pub deploying: Option<bool>,
+    pub deploying_timestamp: Option<DateTime<Utc>>,
+    pub scheduled_deployment_timestamp: Option<DateTime<Utc>>,
+    pub rfq_enabled: Option<bool>,
+    pub event_start_time: Option<DateTime<Utc>>,
+    pub fees_enabled: Option<bool>,
+    pub fee_schedule: Option<FeeSchedule>,
+}
+
+impl Market {
+    /// Decode a stringified JSON array field, e.g. `m.parse_string_array(&m.outcomes)`.
+    pub fn parse_string_array(field: &Option<String>) -> Vec<String> {
+        field
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ImageOptimization {
+    pub id: String,
+    pub image_url_source: Option<String>,
+    pub image_url_optimized: Option<String>,
+    pub image_size_kb_source: Option<f64>,
+    pub image_size_kb_optimized: Option<f64>,
+    pub image_optimized_complete: Option<bool>,
+    pub image_optimized_last_updated: Option<String>,
+    #[serde(rename = "relID")]
+    pub rel_id: Option<i64>,
+    pub field: Option<String>,
+    pub relname: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Event {
+    pub id: String,
+    pub ticker: Option<String>,
+    pub slug: Option<String>,
+    pub title: Option<String>,
+    pub subtitle: Option<String>,
+    pub description: Option<String>,
+    pub resolution_source: Option<String>,
+    pub start_date: Option<DateTime<Utc>>,
+    pub creation_date: Option<DateTime<Utc>>,
+    pub end_date: Option<DateTime<Utc>>,
+    pub image: Option<String>,
+    pub icon: Option<String>,
+    pub active: Option<bool>,
+    pub closed: Option<bool>,
+    pub archived: Option<bool>,
+    pub new: Option<bool>,
+    pub featured: Option<bool>,
+    pub restricted: Option<bool>,
+    pub liquidity: Option<f64>,
+    pub volume: Option<f64>,
+    pub open_interest: Option<f64>,
+    pub sort_by: Option<String>,
+    pub category: Option<String>,
+    pub subcategory: Option<String>,
+    pub is_template: Option<bool>,
+    pub template_variables: Option<String>,
+    #[serde(rename = "published_at")]
+    pub published_at: Option<String>,
+    pub created_by: Option<String>,
+    pub updated_by: Option<String>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
+    pub comments_enabled: Option<bool>,
+    pub competitive: Option<f64>,
+    pub volume_24hr: Option<f64>,
+    pub volume_1wk: Option<f64>,
+    pub volume_1mo: Option<f64>,
+    pub volume_1yr: Option<f64>,
+    pub featured_image: Option<String>,
+    pub disqus_thread: Option<String>,
+    pub parent_event: Option<String>,
+    pub enable_order_book: Option<bool>,
+    pub liquidity_clob: Option<f64>,
+    pub neg_risk: Option<bool>,
+    #[serde(rename = "negRiskMarketID")]
+    pub neg_risk_market_id: Option<String>,
+    pub neg_risk_fee_bips: Option<i64>,
+    pub comment_count: Option<i64>,
+    pub image_optimized: Option<ImageOptimization>,
+    pub icon_optimized: Option<ImageOptimization>,
+    pub featured_image_optimized: Option<ImageOptimization>,
+    pub sub_events: Option<Vec<String>>,
+    pub markets: Option<Vec<Market>>,
+    pub series: Option<Vec<Series>>,
+    pub categories: Option<Vec<Category>>,
+    pub collections: Option<Vec<Collection>>,
+    pub tags: Option<Vec<Tag>>,
+    pub cyom: Option<bool>,
+    pub closed_time: Option<DateTime<Utc>>,
+    pub show_all_outcomes: Option<bool>,
+    pub show_market_images: Option<bool>,
+    pub automatically_resolved: Option<bool>,
+    pub enable_neg_risk: Option<bool>,
+    pub automatically_active: Option<bool>,
+    pub event_date: Option<String>,
+    pub start_time: Option<DateTime<Utc>>,
+    pub event_week: Option<i64>,
+    pub series_slug: Option<String>,
+    pub score: Option<String>,
+    pub elapsed: Option<String>,
+    pub period: Option<String>,
+    pub live: Option<bool>,
+    pub ended: Option<bool>,
+    pub finished_timestamp: Option<DateTime<Utc>>,
+    pub gmp_chart_mode: Option<String>,
+    pub event_creators: Option<Vec<EventCreator>>,
+    pub tweet_count: Option<i64>,
+    pub chats: Option<Vec<Chat>>,
+    pub featured_order: Option<i64>,
+    pub estimate_value: Option<bool>,
+    pub cant_estimate: Option<bool>,
+    pub estimated_value: Option<String>,
+    pub templates: Option<Vec<Template>>,
+    pub spreads_main_line: Option<f64>,
+    pub totals_main_line: Option<f64>,
+    pub carousel_map: Option<String>,
+    pub pending_deployment: Option<bool>,
+    pub deploying: Option<bool>,
+    pub deploying_timestamp: Option<DateTime<Utc>>,
+    pub scheduled_deployment_timestamp: Option<DateTime<Utc>>,
+    pub game_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Category {
+    pub id: String,
+    pub label: Option<String>,
+    pub parent_category: Option<String>,
+    pub slug: Option<String>,
+    pub published_at: Option<String>,
+    pub created_by: Option<String>,
+    pub updated_by: Option<String>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Tag {
+    pub id: String,
+    pub label: Option<String>,
+    pub slug: Option<String>,
+    pub force_show: Option<bool>,
+    pub published_at: Option<String>,
+    pub created_by: Option<i64>,
+    pub updated_by: Option<i64>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
+    pub force_hide: Option<bool>,
+    pub is_carousel: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct FeeSchedule {
+    pub exponent: Option<f64>,
+    pub rate: Option<f64>,
+    pub taker_only: Option<bool>,
+    pub rebate_rate: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Series {
+    pub id: String,
+    pub ticker: Option<String>,
+    pub slug: Option<String>,
+    pub title: Option<String>,
+    pub subtitle: Option<String>,
+    pub series_type: Option<String>,
+    pub recurrence: Option<String>,
+    pub description: Option<String>,
+    pub image: Option<String>,
+    pub icon: Option<String>,
+    pub layout: Option<String>,
+    pub active: Option<bool>,
+    pub closed: Option<bool>,
+    pub archived: Option<bool>,
+    pub new: Option<bool>,
+    pub featured: Option<bool>,
+    pub restricted: Option<bool>,
+    pub is_template: Option<bool>,
+    pub template_variables: Option<bool>,
+    pub published_at: Option<String>,
+    pub created_by: Option<String>,
+    pub updated_by: Option<String>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
+    pub comments_enabled: Option<bool>,
+    pub competitive: Option<String>,
+    pub volume_24hr: Option<f64>,
+    pub volume: Option<f64>,
+    pub liquidity: Option<f64>,
+    pub start_date: Option<DateTime<Utc>>,
+    #[serde(rename = "pythTokenID")]
+    pub pyth_token_id: Option<String>,
+    pub cg_asset_name: Option<String>,
+    pub score: Option<i64>,
+    pub events: Option<Vec<Event>>,
+    pub collections: Option<Vec<Collection>>,
+    pub categories: Option<Vec<Category>>,
+    pub tags: Option<Vec<Tag>>,
+    pub comment_count: Option<i64>,
+    pub chats: Option<Vec<Chat>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Collection {
+    pub id: String,
+    pub ticker: Option<String>,
+    pub slug: Option<String>,
+    pub title: Option<String>,
+    pub subtitle: Option<String>,
+    pub collection_type: Option<String>,
+    pub description: Option<String>,
+    pub tags: Option<String>,
+    pub image: Option<String>,
+    pub icon: Option<String>,
+    pub header_image: Option<String>,
+    pub layout: Option<String>,
+    pub active: Option<bool>,
+    pub closed: Option<bool>,
+    pub archived: Option<bool>,
+    pub new: Option<bool>,
+    pub featured: Option<bool>,
+    pub restricted: Option<bool>,
+    pub is_template: Option<bool>,
+    pub template_variables: Option<String>,
+    pub published_at: Option<String>,
+    pub created_by: Option<String>,
+    pub updated_by: Option<String>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
+    pub comments_enabled: Option<bool>,
+    pub image_optimized: Option<ImageOptimization>,
+    pub icon_optimized: Option<ImageOptimization>,
+    pub header_image_optimized: Option<ImageOptimization>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct EventCreator {
+    pub id: String,
+    pub creator_name: Option<String>,
+    pub creator_handle: Option<String>,
+    pub creator_url: Option<String>,
+    pub creator_image: Option<String>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Chat {
+    pub id: String,
+    pub channel_id: Option<String>,
+    pub channel_name: Option<String>,
+    pub channel_image: Option<String>,
+    pub live: Option<bool>,
+    pub start_time: Option<DateTime<Utc>>,
+    pub end_time: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Template {
+    pub id: String,
+    pub event_title: Option<String>,
+    pub event_slug: Option<String>,
+    pub event_image: Option<String>,
+    pub market_title: Option<String>,
+    pub description: Option<String>,
+    pub resolution_source: Option<String>,
+    pub neg_risk: Option<bool>,
+    pub sort_by: Option<String>,
+    pub show_market_images: Option<bool>,
+    pub series_slug: Option<String>,
+    pub outcomes: Option<String>,
+}
