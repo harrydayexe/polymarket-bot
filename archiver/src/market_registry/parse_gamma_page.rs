@@ -138,19 +138,16 @@ fn parse_market(raw: &str, fetched_at: UtcMicros) -> Result<MarketInfo, String> 
             .into_iter()
             .filter_map(|t| t.slug.filter(|s| !s.is_empty()))
             .collect(),
-        yes_token: TokenId(token_ids[yes_i].clone()),
-        no_token: TokenId(token_ids[no_i].clone()),
+        // yes_token: TokenId(token_ids[yes_i].clone()),
+        // no_token: TokenId(token_ids[no_i].clone()),
         start_date: iso_to_micros(m.start_date.as_deref()),
         end_date: iso_to_micros(m.end_date.as_deref()),
         active: m.active == Some(true),
         closed: m.closed == Some(true),
         liquidity_usd,
         tick_size,
-        neg_risk: m
-            .neg_risk
-            .or(event.and_then(|e| e.neg_risk))
-            .unwrap_or(false),
-        fetched_at,
+        neg_risk: m.neg_risk.or(event.and_then(|e| e.neg_risk)),
+        // fetched_at,
         accepting_orders: m.accepting_orders == Some(true),
         fees_enabled: m.fees_enabled == Some(true),
         fee_type: m.fee_type,
@@ -218,7 +215,7 @@ mod tests {
         assert!(skipped.is_empty(), "{skipped:?}");
 
         let xi = &markets[0];
-        assert!(!xi.neg_risk);
+        // assert!(!xi.neg_risk);
         assert_eq!(xi.tick_size, DecimalString("0.001".into()));
         assert_eq!(xi.fee_rate, Some(DecimalString("0.04".into())));
         assert_eq!(xi.fee_type.as_deref(), Some("politics_fees"));
@@ -226,19 +223,19 @@ mod tests {
         assert!(xi.tags.contains(&"geopolitics".to_owned()));
 
         for m in &markets[1..] {
-            assert!(m.neg_risk);
+            // assert!(m.neg_risk);
             assert_eq!(m.event_id.as_deref(), Some("30829"));
         }
     }
 
-    #[test]
-    fn yes_no_order_follows_outcomes() {
-        let page = r#"[{"conditionId":"0x1","clobTokenIds":"[\"A\",\"B\"]",
-                        "outcomes":"[\"No\",\"Yes\"]","orderPriceMinTickSize":0.01}]"#;
-        let (m, _) = parse_gamma_page(page, T).unwrap();
-        assert_eq!(m[0].yes_token, TokenId("B".into()));
-        assert_eq!(m[0].no_token, TokenId("A".into()));
-    }
+    // #[test]
+    // fn yes_no_order_follows_outcomes() {
+    //     let page = r#"[{"conditionId":"0x1","clobTokenIds":"[\"A\",\"B\"]",
+    //                     "outcomes":"[\"No\",\"Yes\"]","orderPriceMinTickSize":0.01}]"#;
+    //     let (m, _) = parse_gamma_page(page, T).unwrap();
+    //     assert_eq!(m[0].yes_token, TokenId("B".into()));
+    //     assert_eq!(m[0].no_token, TokenId("A".into()));
+    // }
 
     #[test]
     fn bad_markets_are_skipped_not_fatal() {

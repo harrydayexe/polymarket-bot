@@ -1,4 +1,6 @@
-use clap::{Parser, Subcommand};
+use std::path::{Path, PathBuf};
+
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
@@ -11,19 +13,26 @@ pub struct Cli {
     pub command: Commands,
 }
 
+#[derive(Args)]
+pub struct CommonArgs {
+    /// Path to the config file. By default looks for ./config.toml
+    #[arg(short, long, default_value = "./config.toml")]
+    pub config: PathBuf,
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Starts the recorder. Runs until stopped
-    Run,
+    Run(CommonArgs),
 
     /// Pre-flight checks
-    Check,
+    Check(CommonArgs),
 
     /// Reads the status file. Exits 0 if healthy, 3 if not.
-    Status,
+    Status(CommonArgs),
 
     /// Prints the markets the registry would select right now, with counts.
-    Markets,
+    Markets(CommonArgs),
 
     /// Takes REST snapshot immediately and writes them to the archive
     Snapshot(crate::commands::snapshot::SnapshotArgs),

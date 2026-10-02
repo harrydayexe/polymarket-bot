@@ -15,6 +15,7 @@ rust_decimal_macros = "1.40.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["raw_value"] }
 tokio = { version = "1.53.1", features = ["full"] }
+tokio-util = "0.7.19"
 toml = "1.1.6"
 
 [dev-dependencies]

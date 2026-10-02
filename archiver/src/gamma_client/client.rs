@@ -12,7 +12,7 @@ use crate::{
 /// Gamma API client to pull data from the API.
 pub trait GammaClient: Send + Sync {
     /// Fetch the id of a tag.
-    async fn fetch_tag_id(&self, tag: String) -> Result<String>;
+    async fn fetch_tag_id(&self, tag: &String) -> Result<String>;
 
     /// Fetch a page of data from the Gamma API endpoint.
     ///
@@ -23,12 +23,11 @@ pub trait GammaClient: Send + Sync {
     ///   page.
     async fn fetch_page(
         &self,
-        tags: Vec<String>,
+        tags: &[String],
         after_cursor: Option<String>,
     ) -> Result<KeysetMarketsResponse>;
 }
 
-const BASE_URL: &str = "https://gamma-api.polymarket.com";
 const TAG_SLUG_ENDPOINT: &str = "tags/slug";
 const MARKETS_KEYSET_ENDPOINT: &str = "markets/keyset";
 
@@ -53,9 +52,9 @@ impl APIClient {
 }
 
 impl GammaClient for APIClient {
-    async fn fetch_tag_id(&self, tag: String) -> Result<String> {
+    async fn fetch_tag_id(&self, tag: &String) -> Result<String> {
         // Lock, copy out, and release before any .await
-        let cached = self.tag_map.lock().unwrap().get(&tag).cloned();
+        let cached = self.tag_map.lock().unwrap().get(tag).cloned();
         if let Some(id) = cached {
             return Ok(id);
         }
@@ -75,14 +74,14 @@ impl GammaClient for APIClient {
         self.tag_map
             .lock()
             .unwrap()
-            .insert(tag, tag_resp.id.clone());
+            .insert(tag.clone(), tag_resp.id.clone());
 
         Ok(tag_resp.id)
     }
 
     async fn fetch_page(
         &self,
-        tags: Vec<String>,
+        tags: &[String],
         after_cursor: Option<String>,
     ) -> Result<KeysetMarketsResponse> {
         let tag_ids: Vec<String> = stream::iter(tags)
@@ -91,22 +90,22 @@ impl GammaClient for APIClient {
             .try_collect()
             .await?;
 
-        let req = self
+        let min_liq = self.config.min_liquidity_usd.to_string();
+
+        let resp = self
             .client
             .get(format!(
                 "{}/{MARKETS_KEYSET_ENDPOINT}",
                 self.config.gamma_url
             ))
-            .query(&[("limit", "100")])
+            .query(&[
+                ("limit", "100"),
+                ("closed", "false"),
+                ("liquidity_num_min", &min_liq),
+            ])
             .query(&[("after_cursor", after_cursor.as_deref())])
             .query(&tag_ids.iter().map(|id| ("tag_id", id)).collect::<Vec<_>>())
-            .build()?;
-
-        println!("{}", req.url());
-
-        let resp: KeysetMarketsResponse = self
-            .client
-            .execute(req)
+            .send()
             .await?
             .error_for_status()?
             .json()

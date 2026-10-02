@@ -1,8 +1,13 @@
 use chrono::NaiveDate;
 use clap::Args;
 
+use crate::cli::CommonArgs;
+
 #[derive(Args)]
 pub struct GapsArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+
     /// Specify the date to check for gaps on
     #[arg(short, long, value_parser = crate::commands::parse_date::parse_date)]
     date: Option<NaiveDate>,
@@ -12,7 +17,7 @@ pub struct GapsArgs {
     tokens: Option<Vec<String>>,
 }
 
-pub fn execute(args: GapsArgs) -> anyhow::Result<()> {
+pub async fn execute(args: GapsArgs) -> anyhow::Result<()> {
     match args.date {
         None => println!("Gaps..."),
         Some(d) => println!("Gaps on {:?}", d),

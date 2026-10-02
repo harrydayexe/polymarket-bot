@@ -1,8 +1,13 @@
 use chrono::NaiveDate;
 use clap::Args;
 
+use crate::cli::CommonArgs;
+
 #[derive(Args)]
 pub struct CompactArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+
     /// Date to compact since
     #[arg(
         short,
@@ -13,7 +18,7 @@ pub struct CompactArgs {
     date: Option<NaiveDate>,
 }
 
-pub fn execute(args: CompactArgs) -> anyhow::Result<()> {
+pub async fn execute(args: CompactArgs) -> anyhow::Result<()> {
     match args.date {
         None => println!("Compact..."),
         Some(d) => println!("Compacting since {:?}", d),

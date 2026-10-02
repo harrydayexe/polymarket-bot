@@ -1,7 +1,12 @@
 use clap::Args;
 
+use crate::cli::CommonArgs;
+
 #[derive(Args)]
 pub struct SnapshotArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+
     /// Snapshot everything
     #[arg(short, long, conflicts_with = "tokens")]
     all: bool,
@@ -11,7 +16,7 @@ pub struct SnapshotArgs {
     tokens: Option<Vec<String>>,
 }
 
-pub fn execute(args: SnapshotArgs) -> anyhow::Result<()> {
+pub async fn execute(args: SnapshotArgs) -> anyhow::Result<()> {
     if args.all {
         println!("Snapshot all...");
     } else {
