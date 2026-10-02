@@ -6,7 +6,7 @@ use crate::cli::CommonArgs;
 #[derive(Args)]
 pub struct VerifyArgs {
     #[command(flatten)]
-    common: CommonArgs,
+    pub common: CommonArgs,
 
     /// Specify the date to verify
     #[arg(short, long, value_parser = crate::commands::parse_date::parse_date)]

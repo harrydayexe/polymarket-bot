@@ -6,7 +6,7 @@ use crate::cli::CommonArgs;
 #[derive(Args)]
 pub struct GapsArgs {
     #[command(flatten)]
-    common: CommonArgs,
+    pub common: CommonArgs,
 
     /// Specify the date to check for gaps on
     #[arg(short, long, value_parser = crate::commands::parse_date::parse_date)]

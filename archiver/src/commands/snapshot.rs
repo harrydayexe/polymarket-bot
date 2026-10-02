@@ -5,7 +5,7 @@ use crate::cli::CommonArgs;
 #[derive(Args)]
 pub struct SnapshotArgs {
     #[command(flatten)]
-    common: CommonArgs,
+    pub common: CommonArgs,
 
     /// Snapshot everything
     #[arg(short, long, conflicts_with = "tokens")]

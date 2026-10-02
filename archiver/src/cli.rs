@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
+use clap_verbosity_flag::Verbosity;
 
 #[derive(Parser)]
 #[command(
@@ -18,6 +19,9 @@ pub struct CommonArgs {
     /// Path to the config file. By default looks for ./config.toml
     #[arg(short, long, default_value = "./config.toml")]
     pub config: PathBuf,
+
+    #[command(flatten)]
+    pub verbose: Verbosity,
 }
 
 #[derive(Subcommand)]
@@ -45,4 +49,19 @@ pub enum Commands {
 
     /// Lists recorded gaps with durations and reasons
     Gaps(crate::commands::gaps::GapsArgs),
+}
+
+impl Commands {
+    pub fn common(&self) -> &CommonArgs {
+        match self {
+            Commands::Run(args) => &args,
+            Commands::Check(args) => &args,
+            Commands::Status(args) => &args,
+            Commands::Markets(args) => &args,
+            Commands::Snapshot(args) => &args.common,
+            Commands::Compact(args) => &args.common,
+            Commands::Verify(args) => &args.common,
+            Commands::Gaps(args) => &args.common,
+        }
+    }
 }

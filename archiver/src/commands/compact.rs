@@ -6,7 +6,7 @@ use crate::cli::CommonArgs;
 #[derive(Args)]
 pub struct CompactArgs {
     #[command(flatten)]
-    common: CommonArgs,
+    pub common: CommonArgs,
 
     /// Date to compact since
     #[arg(
