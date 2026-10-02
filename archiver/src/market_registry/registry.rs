@@ -10,7 +10,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use marcasite::{Paginated, data::ConditionId, gamma::Market};
 
 use crate::{
-    clock::{Clock, SharedClock},
+    clock::SharedClock,
     config::Config,
     market_registry::tracked_market::{
         MarketStatus::{self},
