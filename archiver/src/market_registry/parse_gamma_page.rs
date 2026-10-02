@@ -4,7 +4,7 @@ use serde_json::value::RawValue;
 
 use crate::{
     market_registry::market_info::MarketInfo,
-    types::{ConditionId, DecimalString, TokenId, UtcMicros},
+    types::{ConditionId, DecimalString, UtcMicros},
 };
 
 /// Defines a market that was present on the page but could not be parsed.
@@ -88,7 +88,7 @@ pub fn parse_gamma_page(
     Ok((markets, skipped))
 }
 
-fn parse_market(raw: &str, fetched_at: UtcMicros) -> Result<MarketInfo, String> {
+fn parse_market(raw: &str, _fetched_at: UtcMicros) -> Result<MarketInfo, String> {
     let m: GammaMarket = serde_json::from_str(raw).map_err(|e| format!("malformed market: {e}"))?;
 
     let condition_id = m
@@ -108,7 +108,7 @@ fn parse_market(raw: &str, fetched_at: UtcMicros) -> Result<MarketInfo, String> 
 
     // Order comes from `outcomes`; never assume index 0 is Yes.
     let find = |w: &str| outcomes.iter().position(|o| o.eq_ignore_ascii_case(w));
-    let (yes_i, no_i) = match (find("yes"), find("no")) {
+    let (_yes_i, _no_i) = match (find("yes"), find("no")) {
         (Some(y), Some(n)) => (y, n),
         _ => return Err(format!("outcomes not Yes/No: {outcomes:?}")),
     };

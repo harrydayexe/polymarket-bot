@@ -1,6 +1,6 @@
 use crate::cli::CommonArgs;
 
-pub async fn execute(args: CommonArgs) -> anyhow::Result<()> {
+pub async fn execute(_args: CommonArgs) -> anyhow::Result<()> {
     println!("Run...");
     Ok(())
 }

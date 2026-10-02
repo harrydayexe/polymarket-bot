@@ -82,7 +82,7 @@ impl Registry {
     /// Check if a market should be selected.
     ///
     /// The criteria checked is: Tradability, Category, and Liquidity.
-    pub fn should_select(&self, market: &MarketInfo, config: Arc<Config>) -> bool {
+    pub fn should_select(&self, market: &MarketInfo, _config: Arc<Config>) -> bool {
         // Recently Removed Check
         if self.recently_removed.contains_key(&market.condition_id) {
             return false;
