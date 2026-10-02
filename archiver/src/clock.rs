@@ -1,43 +1,50 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
 
-use crate::types::{MonoTime, UtcMicros};
+#[cfg(test)]
+use chrono::Duration;
+use chrono::{DateTime, Utc};
+#[cfg(test)]
+use tokio::time::Instant;
 
-pub trait Clock {
-    /// Get the current wall time in UTC microseconds.
-    fn wall_now(&self) -> UtcMicros;
-    fn wall_in_hours(&self, hours: i64) -> UtcMicros;
+pub trait Clock: Send + Sync + 'static {
+    fn now(&self) -> DateTime<Utc>;
 }
 
+pub type SharedClock = Arc<dyn Clock>;
+
+/// Production clock: real wall time.
+#[derive(Debug, Default, Clone, Copy)]
 pub struct SystemClock;
 
 impl Clock for SystemClock {
-    fn wall_now(&self) -> UtcMicros {
-        let micros: i64 = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock before 1970")
-            .as_micros() as i64;
-
-        UtcMicros(micros)
-    }
-
-    fn wall_in_hours(&self, hours: i64) -> UtcMicros {
-        UtcMicros(self.wall_now().0 + hours * 3_600_000_000)
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
     }
 }
 
-/// Test clock: wall time moves in step with Tokio's paused clock
-pub struct FakeClock {
-    base_wall: UtcMicros,
-    base_mono: MonoTime,
+/// Test clock: wall time derived from tokio's (pausable) Instant.
+/// With `tokio::time::pause()`, `advance()` and sleeps move this clock too.
+#[cfg(test)]
+pub struct TokioClock {
+    start_wall: DateTime<Utc>,
+    start_instant: Instant,
 }
 
-impl Clock for FakeClock {
-    fn wall_now(&self) -> UtcMicros {
-        let elapsed = MonoTime::now() - self.base_mono;
-        UtcMicros(self.base_wall.0 + elapsed.as_micros() as i64)
+#[cfg(test)]
+impl TokioClock {
+    /// Must be created inside a tokio runtime.
+    pub fn new(start_wall: DateTime<Utc>) -> Self {
+        Self {
+            start_wall,
+            start_instant: Instant::now(),
+        }
     }
+}
 
-    fn wall_in_hours(&self, hours: i64) -> UtcMicros {
-        UtcMicros(self.wall_now().0 + hours * 3_600_000_000)
+#[cfg(test)]
+impl Clock for TokioClock {
+    fn now(&self) -> DateTime<Utc> {
+        let elapsed = self.start_instant.elapsed();
+        self.start_wall + Duration::from_std(elapsed).expect("elapsed overflow")
     }
 }

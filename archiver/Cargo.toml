@@ -10,6 +10,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 clap-verbosity-flag = "3.0.4"
 env_logger = "0.11.11"
 futures = "0.3.34"
+futures-util = "0.3.34"
 log = "0.4.34"
 marcasite = { version = "0.1.0", default-features = false, features = ["clob", "data", "gamma", "ws"] }
 rand = "0.10.3"

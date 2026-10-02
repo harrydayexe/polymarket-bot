@@ -1,11 +1,12 @@
-use crate::types::{ConnAttemptId, RunId, UtcMicros};
+use crate::types::{ConnAttemptId, RunId};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Envelope wraps unparsed data from the API with some metadata.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Envelope {
     /// When the frame was received, from the system clock.
-    recv_ts: UtcMicros,
+    recv_ts: DateTime<Utc>,
 
     /// A counter that increases by one for every record written.
     seq: i64,

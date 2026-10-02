@@ -1,8 +1,7 @@
-use std::collections::HashSet;
+use chrono::{DateTime, Utc};
+use tokio::time::Instant;
 
-use crate::types::{
-    ConnAttemptId, ConnSlotId, ControlBody, GapReason, MonoTime, SnapshotReason, TokenId, UtcMicros,
-};
+use crate::types::{ConnAttemptId, ConnSlotId, ControlBody, GapReason, SnapshotReason};
 
 #[derive(Debug)]
 pub struct Connection {
@@ -13,21 +12,21 @@ pub struct Connection {
     attempt_count: i64,
     state: ConnState,
     /// Which tokens we **want** to subscribe to.
-    assigned_tokens: HashSet<TokenId>,
+    // assigned_tokens: HashSet<TokenId>,
     /// Which tokens we **are** currently subscribed to.
-    subscribed_tokens: HashSet<TokenId>,
+    // subscribed_tokens: HashSet<TokenId>,
     /// Written by the socket reader only.
-    last_message_at: Option<UtcMicros>,
-    last_pong_at: Option<MonoTime>,
-    last_ping_at: Option<MonoTime>,
+    last_message_at: Option<DateTime<Utc>>,
+    last_pong_at: Option<Instant>,
+    last_ping_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
 enum ConnState {
-    Connecting { started_at: MonoTime },
+    Connecting { started_at: Instant },
     Subscribing,
-    Streaming { since: MonoTime },
-    Backoff { until: MonoTime },
+    Streaming { since: Instant },
+    Backoff { until: Instant },
     Closing,
     Closed,
 }
@@ -40,25 +39,25 @@ enum ConnAction {
     },
     CloseSocket,
     SendSubscribe {
-        tokens: HashSet<TokenId>,
+        // tokens: HashSet<TokenId>,
         custom_features: bool,
     },
     SendUnsubscribe {
-        tokens: HashSet<TokenId>,
+        // tokens: HashSet<TokenId>,
     },
     SendPing,
     RequestSnapshot {
-        tokens: HashSet<TokenId>,
+        // tokens: HashSet<TokenId>,
         reason: SnapshotReason,
     },
     OpenGaps {
-        tokens: HashSet<TokenId>,
-        start: UtcMicros,
+        // tokens: HashSet<TokenId>,
+        start: DateTime<Utc>,
         reason: GapReason,
     },
     CloseGaps {
-        tokens: HashSet<TokenId>,
-        end: UtcMicros,
+        // tokens: HashSet<TokenId>,
+        end: DateTime<Utc>,
         reason: GapReason,
     },
     Emit {
