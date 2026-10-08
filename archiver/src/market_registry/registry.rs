@@ -2,25 +2,34 @@ use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use std::{
     collections::{HashMap, HashSet},
+    fmt::Display,
     sync::Arc,
 };
 
 use chrono::{DateTime, TimeDelta, Utc};
-use marcasite::{Paginated, data::ConditionId, gamma::Market};
+use marcasite::{
+    Paginated,
+    gamma::Market,
+    types::{ConditionId, TokenId},
+};
 
 use crate::{
     clock::SharedClock,
     config::Config,
-    market_registry::tracked_market::{
-        MarketStatus::{self},
-        TrackedMarket,
+    market_registry::{
+        sanity_check::sanity_check,
+        token_changes::TokenChanges,
+        tracked_market::{
+            MarketStatus::{self},
+            TrackedMarket,
+        },
     },
 };
 
 use super::tracked_market::ClosingCause;
 
 #[derive(Debug)]
-pub struct PlannedChanges {
+struct PlannedChanges {
     add: HashMap<ConditionId, TrackedMarket>,
     remove: HashSet<ConditionId>,
     details_changed: HashMap<ConditionId, TrackedMarket>,
@@ -29,32 +38,62 @@ pub struct PlannedChanges {
 #[derive(Debug, Default)]
 pub struct Registry {
     /// Markets currently being tracked (either open or in grace period).
-    pub markets: HashMap<ConditionId, TrackedMarket>,
+    markets: HashMap<ConditionId, TrackedMarket>,
     /// Markets that have recently been removed.
     recently_removed: HashMap<ConditionId, DateTime<Utc>>,
     last_accepted_count: u64,
     last_success_at: Option<DateTime<Utc>>,
 }
 
+impl Display for Registry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for market in self.markets.values() {
+            writeln!(f, "{}", market.question)?;
+        }
+        Ok(())
+    }
+}
+
 impl Registry {
+    fn insert_or_update(
+        &mut self,
+        map: HashMap<ConditionId, TrackedMarket>,
+        added: &mut HashSet<TokenId>,
+        removed: &mut HashSet<TokenId>,
+    ) {
+        for (id, market) in map {
+            added.insert(market.yes_token.clone());
+            added.insert(market.no_token.clone());
+            if let Some(old_market) = self.markets.insert(id, market) {
+                removed.insert(old_market.yes_token);
+                removed.insert(old_market.no_token);
+            }
+        }
+    }
+
     /// Apply a set of `PlannedChanges` to a registry object
-    pub fn apply_changes(&mut self, plan: PlannedChanges) {
+    fn apply_changes(&mut self, plan: PlannedChanges) -> TokenChanges {
+        let mut added = HashSet::<TokenId>::new();
+        let mut removed = HashSet::<TokenId>::new();
+
         for id in &plan.remove {
-            self.markets.remove(id);
+            if let Some(market) = self.markets.remove(id) {
+                removed.insert(market.yes_token);
+                removed.insert(market.no_token);
+            }
         }
 
-        for (id, market) in plan.add {
-            self.markets.insert(id, market);
-        }
+        self.insert_or_update(plan.add, &mut added, &mut removed);
+        self.insert_or_update(plan.details_changed, &mut added, &mut removed);
 
-        self.markets.extend(plan.details_changed);
+        TokenChanges { added, removed }
     }
 
     /// Check the current set of tracked markets for markets where the grace period has expired.
-    fn find_expired_markets_to_remove(&self, clock: SharedClock) -> HashSet<ConditionId> {
+    fn find_expired_markets_to_remove(&self, current: &DateTime<Utc>) -> HashSet<ConditionId> {
         self.markets
             .iter()
-            .filter( |(_, v)| matches!(v.status, MarketStatus::Closing { grace_until, .. } if grace_until <= clock.now()))
+            .filter( |(_, v)| matches!(v.status, MarketStatus::Closing { grace_until, .. } if &grace_until <= current))
             .map(|(k, _)| k.clone())
             .collect()
     }
@@ -62,7 +101,7 @@ impl Registry {
     /// Check if a market should be selected.
     ///
     /// The criteria checked is: Tradability, Category, and Liquidity.
-    pub fn should_select(&self, market: &TrackedMarket, _config: Arc<Config>) -> bool {
+    fn should_select(&self, market: &TrackedMarket, _config: Arc<Config>) -> bool {
         // Recently Removed Check
         if self.recently_removed.contains_key(&market.condition_id) {
             return false;
@@ -80,12 +119,12 @@ impl Registry {
         &mut self,
         mut results: Paginated<Market>,
         config: Arc<Config>,
-        clock: SharedClock,
-    ) -> Result<()> {
+        at: DateTime<Utc>,
+    ) -> Result<TokenChanges> {
         let mut seen: HashSet<ConditionId> = HashSet::new();
         let mut add = HashMap::<ConditionId, TrackedMarket>::new();
         let mut details_changed = HashMap::<ConditionId, TrackedMarket>::new();
-        let remove = self.find_expired_markets_to_remove(clock.clone());
+        let remove = self.find_expired_markets_to_remove(&at);
 
         let mut count = 0usize;
         let tags = config.category_tags.clone();
@@ -129,8 +168,7 @@ impl Registry {
                         let mut updated_tm = v.clone();
                         updated_tm.update_from(&market);
                         updated_tm.status = MarketStatus::Closing {
-                            grace_until: clock.now()
-                                + TimeDelta::hours(config.closed_grace_period_h),
+                            grace_until: at + TimeDelta::hours(config.closed_grace_period_h),
                             cause: ClosingCause::ClosedOnGamma,
                         };
                         details_changed.insert(k.clone(), updated_tm);
@@ -146,14 +184,16 @@ impl Registry {
             }
         }
 
+        sanity_check(count as u64, self.last_accepted_count)?;
+
         let plan = PlannedChanges {
             add,
             remove,
             details_changed,
         };
 
-        self.apply_changes(plan);
+        self.last_success_at = Some(at);
 
-        Ok(())
+        Ok(self.apply_changes(plan))
     }
 }

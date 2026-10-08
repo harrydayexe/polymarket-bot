@@ -14,5 +14,6 @@ pub async fn fetch_markets_from_gamma(
 ) -> Result<()> {
     let results = client.fetch_page(&config.category_tags).await?;
 
-    registry.get_changes(results, config, clock).await
+    registry.get_changes(results, config, clock.now()).await?;
+    Ok(())
 }

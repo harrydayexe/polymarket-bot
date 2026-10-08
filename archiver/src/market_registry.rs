@@ -1,4 +1,5 @@
+pub mod fetch_from_gamma;
 pub mod registry;
-mod sanity_check;
+pub mod sanity_check;
+pub mod token_changes;
 mod tracked_market;
-pub mod update_from_gamma;

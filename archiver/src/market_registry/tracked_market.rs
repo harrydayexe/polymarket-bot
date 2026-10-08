@@ -1,6 +1,10 @@
 use anyhow::anyhow;
 use chrono::{DateTime, Utc};
-use marcasite::{data::ConditionId, gamma::Market};
+use marcasite::{
+    clob::Token,
+    gamma::Market,
+    types::{ConditionId, TokenId},
+};
 
 #[derive(Debug, Clone)]
 pub struct TrackedMarket {
@@ -11,6 +15,8 @@ pub struct TrackedMarket {
     pub accepting_orders: bool,
     pub added_at: DateTime<Utc>,
     pub status: MarketStatus,
+    pub yes_token: TokenId,
+    pub no_token: TokenId,
 }
 
 impl PartialEq for TrackedMarket {
@@ -29,6 +35,22 @@ impl TryFrom<Market> for TrackedMarket {
     type Error = anyhow::Error;
 
     fn try_from(value: Market) -> Result<Self, Self::Error> {
+        let outcomes = value
+            .outcomes
+            .ok_or(anyhow!("market does not contain outcomes"))?;
+        let tokens = value
+            .clob_token_ids
+            .ok_or(anyhow!("market does not contain clob_token_ids"))?;
+
+        let [t0, t1] = <[TokenId; 2]>::try_from(tokens)
+            .map_err(|_| anyhow!("market does not contain exactly two clob_token_ids"))?;
+
+        let (yes_token, no_token) = match outcomes.as_slice() {
+            [a, b] if a == "Yes" && b == "No" => (t0, t1),
+            [a, b] if a == "No" && b == "Yes" => (t1, t0),
+            _ => return Err(anyhow!("market outcomes are not Yes and No")),
+        };
+
         Ok(Self {
             condition_id: value
                 .condition_id
@@ -45,6 +67,8 @@ impl TryFrom<Market> for TrackedMarket {
             accepting_orders: value
                 .accepting_orders
                 .ok_or(anyhow!("market does not contain accepting_orders"))?,
+            yes_token,
+            no_token,
             added_at: Utc::now(),
             status: MarketStatus::Tracking,
         })

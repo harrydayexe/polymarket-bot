@@ -3,8 +3,8 @@ use std::sync::Arc;
 use crate::client::MarcasiteClient;
 use crate::clock::SystemClock;
 use crate::config::Config;
+use crate::market_registry::fetch_from_gamma::fetch_markets_from_gamma;
 use crate::market_registry::registry::Registry;
-use crate::market_registry::update_from_gamma::fetch_markets_from_gamma;
 
 use crate::cli::CommonArgs;
 
@@ -18,10 +18,8 @@ pub async fn execute(args: CommonArgs) -> anyhow::Result<()> {
         .await
         .unwrap();
 
-    println!("Found {} markets:", registry.markets.len());
-    for market in registry.markets.values() {
-        println!("{}", market.question);
-    }
+    println!("Discovered Markets:");
+    println!("{}", registry);
 
     Ok(())
 }

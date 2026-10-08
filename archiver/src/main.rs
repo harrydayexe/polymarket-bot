@@ -4,6 +4,7 @@ mod clock;
 mod commands;
 mod config;
 mod market_registry;
+mod messages;
 
 use std::process::ExitCode;
 
