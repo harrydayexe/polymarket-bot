@@ -19,6 +19,8 @@ pub struct TrackedMarket {
     pub no_token: TokenId,
 }
 
+/// Compares the details sourced from Gamma. `added_at` and `status` are local tracking state
+/// and are ignored.
 impl PartialEq for TrackedMarket {
     fn eq(&self, other: &Self) -> bool {
         self.condition_id == other.condition_id
@@ -26,8 +28,6 @@ impl PartialEq for TrackedMarket {
             && self.active == other.active
             && self.closed == other.closed
             && self.accepting_orders == other.accepting_orders
-            && self.added_at == other.added_at
-            && self.status == other.status
     }
 }
 
@@ -76,6 +76,7 @@ impl TryFrom<Market> for TrackedMarket {
 }
 
 impl TrackedMarket {
+    /// Copies the details sourced from Gamma, keeping `added_at` and `status`.
     pub fn update_from(&mut self, other: &TrackedMarket) {
         if self == other {
             return;
@@ -86,8 +87,6 @@ impl TrackedMarket {
         self.active = other.active;
         self.closed = other.closed;
         self.accepting_orders = other.accepting_orders;
-        self.added_at = other.added_at;
-        self.status = other.status.clone();
     }
 }
 
