@@ -11,14 +11,17 @@ use crate::cli::CommonArgs;
 pub async fn execute(args: CommonArgs) -> anyhow::Result<()> {
     let config = Arc::new(Config::load(&args.config)?);
     let client = MarcasiteClient::new(config.clone());
-    let registry = Registry::default();
+    let mut registry = Registry::default();
     let clock = Arc::new(SystemClock);
 
-    let plan = fetch_markets_from_gamma(&client, &registry, config.clone(), clock.clone())
+    fetch_markets_from_gamma(&client, &mut registry, config.clone(), clock.clone())
         .await
         .unwrap();
 
-    println!("{}", plan);
+    println!("Found {} markets:", registry.markets.len());
+    for market in registry.markets.values() {
+        println!("{}", market.question);
+    }
 
     Ok(())
 }

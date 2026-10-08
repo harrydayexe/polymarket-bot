@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use core::fmt;
 use futures_util::StreamExt;
 use std::{
     collections::{HashMap, HashSet},
@@ -27,22 +26,10 @@ pub struct PlannedChanges {
     details_changed: HashMap<ConditionId, TrackedMarket>,
 }
 
-impl fmt::Display for PlannedChanges {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Planned Changes:")?;
-        writeln!(f, "- #Added: {}", self.add.len())?;
-        writeln!(f, "\nDiscovered Markets")?;
-        for market in self.add.values() {
-            writeln!(f, "{}", market.question)?;
-        }
-        Ok(())
-    }
-}
-
 #[derive(Debug, Default)]
 pub struct Registry {
     /// Markets currently being tracked (either open or in grace period).
-    markets: HashMap<ConditionId, TrackedMarket>,
+    pub markets: HashMap<ConditionId, TrackedMarket>,
     /// Markets that have recently been removed.
     recently_removed: HashMap<ConditionId, DateTime<Utc>>,
     last_accepted_count: u64,
@@ -88,78 +75,85 @@ impl Registry {
 
         true
     }
-}
 
-pub async fn plan_changes(
-    registry: &Registry,
-    mut results: Paginated<Market>,
-    config: Arc<Config>,
-    clock: SharedClock,
-) -> Result<PlannedChanges> {
-    let mut seen: HashSet<ConditionId> = HashSet::new();
-    let mut add = HashMap::<ConditionId, TrackedMarket>::new();
-    let mut details_changed = HashMap::<ConditionId, TrackedMarket>::new();
-    let remove = registry.find_expired_markets_to_remove(clock.clone());
+    pub async fn get_changes(
+        &mut self,
+        mut results: Paginated<Market>,
+        config: Arc<Config>,
+        clock: SharedClock,
+    ) -> Result<()> {
+        let mut seen: HashSet<ConditionId> = HashSet::new();
+        let mut add = HashMap::<ConditionId, TrackedMarket>::new();
+        let mut details_changed = HashMap::<ConditionId, TrackedMarket>::new();
+        let remove = self.find_expired_markets_to_remove(clock.clone());
 
-    let mut count = 0usize;
-    let tags = config.category_tags.clone();
-    while let Some(market_resp) = results.next().await {
-        let market_resp = market_resp.with_context(|| {
-            format!("listing markets (tags={tags:?}, closed=false) failed after {count} markets")
-        })?;
-        count += 1;
+        let mut count = 0usize;
+        let tags = config.category_tags.clone();
+        while let Some(market_resp) = results.next().await {
+            let market_resp = market_resp.with_context(|| {
+                format!(
+                    "listing markets (tags={tags:?}, closed=false) failed after {count} markets"
+                )
+            })?;
+            count += 1;
 
-        let market: TrackedMarket = market_resp
-            .try_into()
-            .context("failed to process market response from Gamma")?;
+            let market: TrackedMarket = market_resp
+                .try_into()
+                .context("failed to process market response from Gamma")?;
 
-        // Add condition ID to seen set and skip if seen previously
-        if !seen.insert(market.condition_id.clone()) {
-            continue;
+            // Add condition ID to seen set and skip if seen previously
+            if !seen.insert(market.condition_id.clone()) {
+                continue;
+            };
+
+            // Check if market has already been removed
+            if self.recently_removed.contains_key(&market.condition_id)
+                || remove.contains(&market.condition_id)
+            {
+                continue;
+            }
+
+            // Check if we already track the market
+            let tm = self.markets.get_key_value(&market.condition_id);
+            match tm {
+                // Market is not tracked
+                None => {
+                    if self.should_select(&market, config.clone()) {
+                        add.insert(market.condition_id.clone(), market);
+                    }
+                }
+                // Market is tracked already
+                Some((k, v)) => {
+                    // Gamma shows as closed, but currently tracking
+                    if market.closed && v.status == MarketStatus::Tracking {
+                        let mut updated_tm = v.clone();
+                        updated_tm.update_from(&market);
+                        updated_tm.status = MarketStatus::Closing {
+                            grace_until: clock.now()
+                                + TimeDelta::hours(config.closed_grace_period_h),
+                            cause: ClosingCause::ClosedOnGamma,
+                        };
+                        details_changed.insert(k.clone(), updated_tm);
+                    }
+
+                    // Gamma shows as open and details have changed
+                    if !market.closed && !(v == &market) {
+                        let mut updated_tm = v.clone();
+                        updated_tm.update_from(&market);
+                        details_changed.insert(k.clone(), updated_tm);
+                    }
+                }
+            }
+        }
+
+        let plan = PlannedChanges {
+            add,
+            remove,
+            details_changed,
         };
 
-        // Check if market has already been removed
-        if registry.recently_removed.contains_key(&market.condition_id)
-            || remove.contains(&market.condition_id)
-        {
-            continue;
-        }
+        self.apply_changes(plan);
 
-        // Check if we already track the market
-        let tm = registry.markets.get_key_value(&market.condition_id);
-        match tm {
-            // Market is not tracked
-            None => {
-                if registry.should_select(&market, config.clone()) {
-                    add.insert(market.condition_id.clone(), market);
-                }
-            }
-            // Market is tracked already
-            Some((k, v)) => {
-                // Gamma shows as closed, but currently tracking
-                if market.closed && v.status == MarketStatus::Tracking {
-                    let mut updated_tm = v.clone();
-                    updated_tm.update_from(&market);
-                    updated_tm.status = MarketStatus::Closing {
-                        grace_until: clock.now() + TimeDelta::hours(config.closed_grace_period_h),
-                        cause: ClosingCause::ClosedOnGamma,
-                    };
-                    details_changed.insert(k.clone(), updated_tm);
-                }
-
-                // Gamma shows as open and details have changed
-                if !market.closed && !(v == &market) {
-                    let mut updated_tm = v.clone();
-                    updated_tm.update_from(&market);
-                    details_changed.insert(k.clone(), updated_tm);
-                }
-            }
-        }
+        Ok(())
     }
-
-    Ok(PlannedChanges {
-        add,
-        remove,
-        details_changed,
-    })
 }

@@ -3,19 +3,16 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::{
-    client::APIClient,
-    clock::SharedClock,
-    config::Config,
-    market_registry::registry::{PlannedChanges, Registry, plan_changes},
+    client::APIClient, clock::SharedClock, config::Config, market_registry::registry::Registry,
 };
 
 pub async fn fetch_markets_from_gamma(
     client: &impl APIClient,
-    registry: &Registry,
+    registry: &mut Registry,
     config: Arc<Config>,
     clock: SharedClock,
-) -> Result<PlannedChanges> {
+) -> Result<()> {
     let results = client.fetch_page(&config.category_tags).await?;
 
-    plan_changes(registry, results, config, clock).await
+    registry.get_changes(results, config, clock).await
 }
