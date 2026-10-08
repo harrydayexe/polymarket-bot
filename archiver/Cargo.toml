@@ -13,12 +13,14 @@ futures = "0.3.34"
 futures-util = "0.3.34"
 log = "0.4.34"
 marcasite = { version = "0.1.0", default-features = false, features = ["clob", "data", "gamma", "ws"] }
+miette = { version = "7.6.0", features = ["fancy"] }
 rand = "0.10.3"
 reqwest = { version = "0.13.5", features = ["json", "query"] }
 rust_decimal = { version = "1.43.0", features = ["serde"] }
 rust_decimal_macros = "1.40.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["raw_value"] }
+thiserror = "2.0.21"
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-util = "0.7.19"
 toml = "1.1.6"

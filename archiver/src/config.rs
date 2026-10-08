@@ -1,8 +1,48 @@
-use anyhow::{Context, bail, ensure};
+use miette::{Diagnostic, NamedSource, SourceSpan};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+use thiserror::Error;
+
+macro_rules! ensure {
+    ($cond:expr, $($arg:tt)+) => {
+        if !$cond {
+            return Err(ConfigError::Validation(format!($($arg)+)));
+        }
+    };
+}
+
+macro_rules! bail {
+    ($($arg:tt)+) => {
+        return Err(ConfigError::Validation(format!($($arg)+)))
+    };
+}
+
+#[derive(Error, Diagnostic, Debug)]
+pub enum ConfigError {
+    #[error("could not read config file {path}")]
+    #[diagnostic(code(archiver::config::io))]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("invalid config file")]
+    #[diagnostic(code(archiver::config::parse))]
+    Parse {
+        #[source_code]
+        src: NamedSource<String>,
+        #[label("{message}")]
+        span: Option<SourceSpan>,
+        message: String,
+    },
+
+    #[error("invalid config: {0}")]
+    #[diagnostic(code(archiver::config::validation))]
+    Validation(String),
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -62,21 +102,27 @@ impl Default for Config {
 
 impl Config {
     /// Reads, parses and validates the config file at `path`.
-    pub fn load(path: &Path) -> anyhow::Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading config file {}", path.display()))?;
-        Self::from_toml_str(&text)
-            .with_context(|| format!("invalid config file {}", path.display()))
+    pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+        Self::from_toml_str(text, path)
     }
 
     /// Parses and validates config from TOML text. Missing keys take their defaults.
-    pub fn from_toml_str(text: &str) -> anyhow::Result<Self> {
-        let config: Self = toml::from_str(text)?;
+    pub fn from_toml_str(text: String, path: &Path) -> Result<Self, ConfigError> {
+        let config: Self = toml::from_str(&text).map_err(|e| ConfigError::Parse {
+            span: e.span().map(|r| (r.start, r.len()).into()),
+            message: e.message().to_string(),
+            src: NamedSource::new(path.display().to_string(), text),
+        })?;
         config.validate()?;
         Ok(config)
     }
 
-    fn validate(&self) -> anyhow::Result<()> {
+    fn validate(&self) -> Result<(), ConfigError> {
         let non_zero = [
             ("registry_interval_s", self.registry_interval_s),
             ("tokens_per_connection", self.tokens_per_connection as u64),
@@ -88,7 +134,7 @@ impl Config {
             ("snapshot_batch_size", self.snapshot_batch_size as u64),
             (
                 "snapshot_max_requests_per_s",
-                self.snapshot_max_requests_per_s.into(),
+                self.snapshot_max_requests_per_s,
             ),
             ("write_queue_capacity", self.write_queue_capacity as u64),
             ("flush_interval_s", self.flush_interval_s),
@@ -157,14 +203,37 @@ impl Config {
 mod tests {
     use super::*;
 
-    /// Unwrap config parsing error for a line of config
-    fn err(text: &str) -> String {
-        format!("{:#}", Config::from_toml_str(text).unwrap_err())
+    fn parse(text: &str) -> Result<Config, ConfigError> {
+        Config::from_toml_str(text.to_string(), Path::new("config.toml"))
+    }
+
+    /// Returns the message of a validation error, panicking on any other outcome.
+    fn validation_err(text: &str) -> String {
+        match parse(text) {
+            Err(ConfigError::Validation(msg)) => msg,
+            other => panic!("expected validation error, got {other:?}"),
+        }
+    }
+
+    /// Returns the message of a parse error and the source text its label points at,
+    /// panicking on any other outcome.
+    fn parse_err(text: &str) -> (String, &str) {
+        match parse(text) {
+            Err(ConfigError::Parse {
+                message,
+                span: Some(span),
+                src,
+            }) => {
+                assert_eq!(src.name(), "config.toml");
+                (message, &text[span.offset()..span.offset() + span.len()])
+            }
+            other => panic!("expected parse error with a span, got {other:?}"),
+        }
     }
 
     #[test]
     fn empty_file_gives_defaults() {
-        let config = Config::from_toml_str("").unwrap();
+        let config = parse("").unwrap();
         let default = Config::default();
         assert_eq!(format!("{config:?}"), format!("{default:?}"));
         assert_eq!(config.tokens_per_connection, 250);
@@ -179,19 +248,19 @@ mod tests {
 
     #[test]
     fn file_value_overrides_default() {
-        let config = Config::from_toml_str("tokens_per_connection = 100").unwrap();
+        let config = parse("tokens_per_connection = 100").unwrap();
         assert_eq!(config.tokens_per_connection, 100);
     }
 
     #[test]
     fn negative_interval_is_refused() {
-        let msg = err("heartbeat_interval_s = -5");
-        assert!(msg.contains("heartbeat_interval_s"), "{msg}");
+        let (_, spanned) = parse_err("heartbeat_interval_s = -5");
+        assert_eq!(spanned, "-5");
     }
 
     #[test]
     fn zero_interval_is_refused() {
-        let msg = err("registry_interval_s = 0");
+        let msg = validation_err("registry_interval_s = 0");
         assert!(
             msg.contains("registry_interval_s must be greater than 0"),
             "{msg}"
@@ -200,13 +269,13 @@ mod tests {
 
     #[test]
     fn negative_grace_is_refused() {
-        let msg = err("closed_grace_period_h = -5");
+        let msg = validation_err("closed_grace_period_h = -5");
         assert!(msg.contains("closed_grace_period_h"), "{msg}");
     }
 
     #[test]
     fn heartbeat_timeout_shorter_than_interval_is_refused() {
-        let msg = err("heartbeat_interval_s = 30\nheartbeat_timeout_s = 10");
+        let msg = validation_err("heartbeat_interval_s = 30\nheartbeat_timeout_s = 10");
         assert!(
             msg.contains("heartbeat_timeout_s (10) must be longer"),
             "{msg}"
@@ -215,13 +284,13 @@ mod tests {
 
     #[test]
     fn heartbeat_timeout_equal_to_interval_is_refused() {
-        let msg = err("heartbeat_interval_s = 10\nheartbeat_timeout_s = 10");
+        let msg = validation_err("heartbeat_interval_s = 10\nheartbeat_timeout_s = 10");
         assert!(msg.contains("heartbeat_timeout_s"), "{msg}");
     }
 
     #[test]
     fn backoff_initial_above_max_is_refused() {
-        let msg = err("backoff_initial_s = 120");
+        let msg = validation_err("backoff_initial_s = 120");
         assert!(
             msg.contains("backoff_initial_s (120) must not exceed"),
             "{msg}"
@@ -230,46 +299,53 @@ mod tests {
 
     #[test]
     fn oversized_snapshot_batch_is_refused() {
-        let msg = err("snapshot_batch_size = 501");
+        let msg = validation_err("snapshot_batch_size = 501");
         assert!(msg.contains("snapshot_batch_size"), "{msg}");
     }
 
     #[test]
     fn negative_liquidity_is_refused() {
-        let msg = err("min_liquidity_usd = -1.0");
+        let msg = validation_err("min_liquidity_usd = -1.0");
         assert!(msg.contains("min_liquidity_usd"), "{msg}");
     }
 
     #[test]
     fn bad_log_level_is_refused() {
-        let msg = err("log_level = \"loud\"");
+        let msg = validation_err("log_level = \"loud\"");
         assert!(msg.contains("log_level"), "{msg}");
     }
 
     #[test]
     fn bad_url_scheme_is_refused() {
-        let msg = err("websocket_url = \"https://example.com\"");
+        let msg = validation_err("websocket_url = \"https://example.com\"");
         assert!(msg.contains("websocket_url"), "{msg}");
     }
 
     #[test]
     fn unknown_key_is_refused_by_name() {
-        let msg = err("tokens_per_conection = 100");
+        let (msg, spanned) = parse_err("tokens_per_conection = 100");
         assert!(msg.contains("tokens_per_conection"), "{msg}");
+        assert_eq!(spanned, "tokens_per_conection");
     }
 
     #[test]
     fn wrong_type_is_refused() {
-        let msg = err("tokens_per_connection = \"lots\"");
-        assert!(msg.contains("tokens_per_connection"), "{msg}");
+        let (_, spanned) = parse_err("tokens_per_connection = \"lots\"");
+        assert_eq!(spanned, "\"lots\"");
     }
 
     #[test]
     fn missing_file_is_refused() {
-        let msg = format!(
-            "{:#}",
-            Config::load(Path::new("/nonexistent/config.toml")).unwrap_err()
-        );
-        assert!(msg.contains("/nonexistent/config.toml"), "{msg}");
+        let path = Path::new("/nonexistent/config.toml");
+        match Config::load(path) {
+            Err(ConfigError::Io {
+                path: err_path,
+                source,
+            }) => {
+                assert_eq!(err_path, path);
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+            }
+            other => panic!("expected io error, got {other:?}"),
+        }
     }
 }

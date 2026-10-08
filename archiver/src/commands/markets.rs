@@ -9,7 +9,7 @@ use crate::market_registry::update_from_gamma::fetch_markets_from_gamma;
 use crate::cli::CommonArgs;
 
 pub async fn execute(args: CommonArgs) -> anyhow::Result<()> {
-    let config = Arc::new(Config::load(&args.config).unwrap());
+    let config = Arc::new(Config::load(&args.config)?);
     let client = MarcasiteClient::new(config.clone());
     let registry = Registry::default();
     let clock = Arc::new(SystemClock);
