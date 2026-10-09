@@ -1,7 +1,7 @@
 archive_dir = "./archive"                                              # Root of everything in section 8.3
 category_tags = ["politics", "geopolitics"]                            # Gamma tag names to include
 min_liquidity_usd = 2000000                                            # Joining threshold only (section 6)
-registry_interval_s = 60
+registry_interval_s = 300
 closed_grace_period_h = 6                                              # Keep recording after close
 tokens_per_connection = 250
 heartbeat_interval_s = 10

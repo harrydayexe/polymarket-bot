@@ -13,7 +13,7 @@ use crate::cli::CommonArgs;
 pub async fn execute(args: CommonArgs) -> anyhow::Result<()> {
     let config = Arc::new(Config::load(&args.config)?);
     let client = Arc::new(MarcasiteClient::new(config.clone()));
-    let mut registry = Registry::default();
+    let mut registry = Registry::new(config.clone());
     let clock = Arc::new(SystemClock);
     let token = CancellationToken::new();
 

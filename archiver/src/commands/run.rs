@@ -1,10 +1,15 @@
 use std::sync::Arc;
 
+use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
-    cli::CommonArgs, client::MarcasiteClient, clock::SystemClock, config::Config,
+    cli::CommonArgs,
+    client::MarcasiteClient,
+    clock::SystemClock,
+    config::Config,
     market_registry::registry_task::registry_task,
+    messages::{ConnectionManagerMsg, RegistryMsg},
 };
 
 pub async fn execute(_args: CommonArgs, token: CancellationToken) -> anyhow::Result<()> {
@@ -17,7 +22,18 @@ pub async fn execute(_args: CommonArgs, token: CancellationToken) -> anyhow::Res
     let tracker = TaskTracker::new();
     let registry_token = token.child_token();
 
-    tracker.spawn(registry_task(registry_token, client, config, clock));
+    let (registry_tx, registry_rx) = mpsc::channel::<RegistryMsg>(64);
+    let (conn_mgr_tx, conn_mgr_rx) = mpsc::channel::<ConnectionManagerMsg>(256);
+    // let (write_tx, write_rx)       = mpsc::channel::<WriteMsg>(10_000);
+
+    tracker.spawn(registry_task(
+        registry_rx,
+        conn_mgr_tx,
+        registry_token,
+        client,
+        config,
+        clock,
+    ));
 
     // No more tasks to be added.
     tracker.close();

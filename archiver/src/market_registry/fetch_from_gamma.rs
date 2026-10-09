@@ -4,7 +4,10 @@ use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    client::APIClient, clock::SharedClock, config::Config, market_registry::registry::Registry,
+    client::APIClient,
+    clock::SharedClock,
+    config::Config,
+    market_registry::{registry::Registry, token_changes::TokenChanges},
 };
 
 pub async fn fetch_markets_from_gamma(
@@ -13,14 +16,15 @@ pub async fn fetch_markets_from_gamma(
     config: Arc<Config>,
     clock: SharedClock,
     token: CancellationToken,
-) -> Result<()> {
+) -> Result<Option<TokenChanges>> {
     let at = clock.now();
     tokio::select! {
-        _ = token.cancelled() => Ok(()),
+        _ = token.cancelled() => Ok(None),
         r = async {
             let results = client.fetch_page(&config.category_tags).await?;
-            registry.get_changes(results, config, at).await?;
-            Ok(())
+            let changes = registry.get_changes(results, config, at).await?;
+            tracing::info!("registry updated");
+            Ok(Some(changes))
         } => r,
     }
 }

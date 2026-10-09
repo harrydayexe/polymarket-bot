@@ -36,12 +36,25 @@ struct PlannedChanges {
 
 #[derive(Debug, Default)]
 pub struct Registry {
+    config: Arc<Config>,
     /// Markets currently being tracked (either open or in grace period).
     markets: HashMap<ConditionId, TrackedMarket>,
     /// Markets that have recently been removed.
     recently_removed: HashMap<ConditionId, DateTime<Utc>>,
     last_accepted_count: u64,
     last_success_at: Option<DateTime<Utc>>,
+}
+
+impl Registry {
+    pub fn new(config: Arc<Config>) -> Self {
+        Self {
+            config,
+            markets: HashMap::new(),
+            recently_removed: HashMap::new(),
+            last_accepted_count: 0,
+            last_success_at: None,
+        }
+    }
 }
 
 impl Display for Registry {
@@ -54,6 +67,33 @@ impl Display for Registry {
 }
 
 impl Registry {
+    /// Enter a market as closed via websocket, and enter the grace period.
+    ///
+    /// # Returns
+    ///
+    /// A bool indicating if the market was currently in the tracked set.
+    pub fn resolve_from_websocket(&mut self, id: &ConditionId, at: DateTime<Utc>) -> bool {
+        match self.markets.get_mut(id) {
+            Some(market) if market.status == MarketStatus::Tracking => {
+                market.status = MarketStatus::Closing {
+                    grace_until: at + TimeDelta::hours(self.config.closed_grace_period_h),
+                    cause: ClosingCause::ClosedOnWebSocket,
+                };
+                true
+            }
+            Some(_) => {
+                tracing::info!("Market marked as closed via websocket is already in grace period");
+                true
+            }
+            None => {
+                tracing::warn!(
+                    "Market removed via websocket which was not currently being tracked."
+                );
+                false
+            }
+        }
+    }
+
     fn insert_or_update(
         &mut self,
         map: HashMap<ConditionId, TrackedMarket>,

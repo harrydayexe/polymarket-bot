@@ -77,7 +77,7 @@ impl Default for Config {
             archive_dir: "./archive".into(),
             category_tags: vec!["politics".into(), "geopolitics".into()],
             min_liquidity_usd: dec!(1000),
-            registry_interval_s: 60,
+            registry_interval_s: 300,
             closed_grace_period_h: 6,
             tokens_per_connection: 250,
             heartbeat_interval_s: 10,
