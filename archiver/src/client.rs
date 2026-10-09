@@ -2,7 +2,7 @@ use std::sync::Mutex;
 use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Context, Result};
-use futures::stream::{self, StreamExt, TryStreamExt};
+use async_trait::async_trait;
 use marcasite::Paginated;
 use marcasite::gamma::TagId;
 use marcasite::gamma::{GammaClient, Market};
@@ -10,9 +10,10 @@ use marcasite::gamma::{GammaClient, Market};
 use crate::config::Config;
 
 /// Gamma API client to pull data from the API.
+#[async_trait]
 pub trait APIClient: Send + Sync + 'static {
     /// Fetch the id of a tag.
-    async fn fetch_tag_id(&self, tag: &String) -> Result<TagId>;
+    async fn fetch_tag_id(&self, tag: &str) -> Result<TagId>;
 
     /// Fetch all the markets for a set of tags.
     ///
@@ -49,8 +50,9 @@ impl MarcasiteClient {
     }
 }
 
+#[async_trait]
 impl APIClient for MarcasiteClient {
-    async fn fetch_tag_id(&self, tag: &String) -> Result<TagId> {
+    async fn fetch_tag_id(&self, tag: &str) -> Result<TagId> {
         // Lock, copy out, and release before any .await
         let cached = self.tag_map.lock().unwrap().get(tag).cloned();
         if let Some(id) = cached {
@@ -69,18 +71,16 @@ impl APIClient for MarcasiteClient {
         self.tag_map
             .lock()
             .unwrap()
-            .insert(tag.clone(), tag_id.clone());
+            .insert(tag.to_string(), tag_id.clone());
 
         Ok(tag_id)
     }
 
     async fn fetch_page(&self, tags: &[String]) -> Result<Paginated<Market>> {
-        let tag_ids: Vec<TagId> = stream::iter(tags)
-            .map(|tag| self.fetch_tag_id(tag))
-            .buffered(10)
-            .try_collect()
-            .await
-            .context("failed to retrieve IDs for tag names")?;
+        let tag_ids: Vec<TagId> =
+            futures::future::try_join_all(tags.iter().map(|tag| self.fetch_tag_id(tag)))
+                .await
+                .context("failed to retrieve IDs for tag names")?;
 
         Ok(self
             .client

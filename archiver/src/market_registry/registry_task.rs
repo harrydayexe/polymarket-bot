@@ -8,7 +8,10 @@ use crate::{
     client::APIClient,
     clock::SharedClock,
     config::Config,
-    market_registry::{registry::Registry, tracked_market::TrackedMarket},
+    market_registry::{
+        fetch_from_gamma::fetch_markets_from_gamma, registry::Registry,
+        tracked_market::TrackedMarket,
+    },
 };
 
 pub enum RegistryMsg {
@@ -28,10 +31,12 @@ pub async fn registry_task(
     loop {
         tokio::select! {
             _ = token.cancelled() => {
-                todo!("Need to implement cancellation");
+                break;
             }
             _ = tick.tick() => {
-                todo!("Need to implement tick");
+                if let Err(e) = fetch_markets_from_gamma(client.clone(), &mut registry, config.clone(), clock.clone(), token.clone()) .await {
+                    tracing::warn!(error = format!("{e:#}"), "registry update failed");
+                }
             }
         }
     }

@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::client::MarcasiteClient;
 use crate::clock::SystemClock;
 use crate::config::Config;
@@ -10,11 +12,12 @@ use crate::cli::CommonArgs;
 
 pub async fn execute(args: CommonArgs) -> anyhow::Result<()> {
     let config = Arc::new(Config::load(&args.config)?);
-    let client = MarcasiteClient::new(config.clone());
+    let client = Arc::new(MarcasiteClient::new(config.clone()));
     let mut registry = Registry::default();
     let clock = Arc::new(SystemClock);
+    let token = CancellationToken::new();
 
-    fetch_markets_from_gamma(&client, &mut registry, config.clone(), clock.clone())
+    fetch_markets_from_gamma(client, &mut registry, config, clock, token)
         .await
         .unwrap();
 
