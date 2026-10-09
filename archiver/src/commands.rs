@@ -8,11 +8,13 @@ pub mod snapshot;
 pub mod status;
 pub mod verify;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::cli::{Cli, Commands};
 
-pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
+pub async fn dispatch(cli: Cli, token: CancellationToken) -> anyhow::Result<()> {
     match cli.command {
-        Commands::Run(args) => run::execute(args).await,
+        Commands::Run(args) => run::execute(args, token).await,
         Commands::Check(args) => check::execute(args).await,
         Commands::Status(args) => status::execute(args).await,
         Commands::Markets(args) => markets::execute(args).await,

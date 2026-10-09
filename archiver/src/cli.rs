@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
-use clap_verbosity_flag::Verbosity;
+use clap_verbosity_flag::{Verbosity, WarnLevel};
 
 #[derive(Parser)]
 #[command(
@@ -21,7 +21,7 @@ pub struct CommonArgs {
     pub config: PathBuf,
 
     #[command(flatten)]
-    pub verbose: Verbosity,
+    pub verbose: Verbosity<WarnLevel>,
 }
 
 #[derive(Subcommand)]

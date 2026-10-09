@@ -5,14 +5,21 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
-chrono = { version = "0.4.45", default-features = false, features = ["serde", "std"] }
+chrono = { version = "0.4.45", default-features = false, features = [
+    "serde",
+    "std",
+] }
 clap = { version = "4.6.7", features = ["derive"] }
-clap-verbosity-flag = "3.0.4"
+clap-verbosity-flag = { version = "3.0.4", default-features = false, features = ["tracing"] }
 env_logger = "0.11.11"
 futures = "0.3.34"
 futures-util = "0.3.34"
-log = "0.4.34"
-marcasite = { version = "0.1.0", default-features = false, features = ["clob", "data", "gamma", "ws"] }
+marcasite = { version = "0.1.0", default-features = false, features = [
+    "clob",
+    "data",
+    "gamma",
+    "ws",
+] }
 miette = { version = "7.6.0", features = ["fancy"] }
 rand = "0.10.3"
 reqwest = { version = "0.13.5", features = ["json", "query"] }
@@ -22,8 +29,10 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["raw_value"] }
 thiserror = "2.0.21"
 tokio = { version = "1.53.1", features = ["full"] }
-tokio-util = "0.7.19"
+tokio-util = { version = "0.7.19", features = ["rt"] }
 toml = "1.1.6"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["test-util"] }

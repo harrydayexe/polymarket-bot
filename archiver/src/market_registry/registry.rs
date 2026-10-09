@@ -115,7 +115,7 @@ impl Registry {
         true
     }
 
-    pub async fn get_changes(
+    pub(super) async fn get_changes(
         &mut self,
         mut results: Paginated<Market>,
         config: Arc<Config>,

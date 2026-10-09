@@ -1,20 +1,12 @@
-use thiserror::Error;
-
-#[derive(Error, Debug)]
-#[error("fetched too few records: {fetched_count} ({last_accepted_count} last fetch)")]
-pub struct NotEnoughPagesError {
-    fetched_count: u64,
-    last_accepted_count: u64,
-    threshold: u64,
-}
+use crate::market_registry::not_enough_markets_error::NotEnoughMarketsError;
 
 /// Guard against acting on a bad Gamma response.
 pub fn sanity_check(
     fetched_count: u64,
     last_accepted_count: u64,
-) -> Result<(), NotEnoughPagesError> {
+) -> Result<(), NotEnoughMarketsError> {
     if fetched_count == 0 {
-        return Err(NotEnoughPagesError {
+        return Err(NotEnoughMarketsError {
             fetched_count,
             last_accepted_count,
             threshold: 0,
@@ -28,7 +20,7 @@ pub fn sanity_check(
     let threshold = last_accepted_count / 2;
     match fetched_count >= threshold {
         true => Ok(()),
-        false => Err(NotEnoughPagesError {
+        false => Err(NotEnoughMarketsError {
             fetched_count,
             last_accepted_count,
             threshold,
