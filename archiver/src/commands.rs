@@ -17,7 +17,7 @@ pub async fn dispatch(cli: Cli, token: CancellationToken) -> anyhow::Result<()> 
         Commands::Run(args) => run::execute(args, token).await,
         Commands::Check(args) => check::execute(args).await,
         Commands::Status(args) => status::execute(args).await,
-        Commands::Markets(args) => markets::execute(args).await,
+        Commands::Markets(args) => markets::execute(args, token).await,
         Commands::Snapshot(args) => snapshot::execute(args).await,
         Commands::Compact(args) => compact::execute(args).await,
         Commands::Verify(args) => verify::execute(args).await,

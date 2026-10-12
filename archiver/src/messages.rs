@@ -1,6 +1,7 @@
+use chrono::{DateTime, Utc};
 use marcasite::types::ConditionId;
 
-use crate::market_registry::token_changes::TokenChanges;
+use crate::market_registry::{registry::PlannedChanges, token_changes::TokenChanges};
 
 pub enum RegistryMsg {
     MarketResolved(ConditionId),
@@ -9,4 +10,12 @@ pub enum RegistryMsg {
 
 pub enum ConnectionManagerMsg {
     TokenChanges(TokenChanges),
+}
+
+pub enum Record {
+    Market {
+        recv_ts: DateTime<Utc>,
+        changes: PlannedChanges,
+    },
+    Control,
 }

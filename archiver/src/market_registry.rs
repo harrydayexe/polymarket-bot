@@ -4,4 +4,5 @@ pub mod registry;
 pub mod registry_task;
 mod sanity_check;
 pub mod token_changes;
-mod tracked_market;
+pub mod tracked_market;
+mod update_from_gamma;

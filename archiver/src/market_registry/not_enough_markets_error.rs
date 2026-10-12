@@ -7,4 +7,3 @@ pub struct NotEnoughMarketsError {
     pub(super) last_accepted_count: u64,
     pub(super) threshold: u64,
 }
-

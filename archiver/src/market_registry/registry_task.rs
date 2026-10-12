@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use std::{sync::Arc, time::Duration};
 
 use tokio::{sync::mpsc, time};
@@ -7,52 +8,55 @@ use crate::{
     client::APIClient,
     clock::SharedClock,
     config::Config,
-    market_registry::{fetch_from_gamma::fetch_markets_from_gamma, registry::Registry},
-    messages::{ConnectionManagerMsg, RegistryMsg},
+    market_registry::{registry::Registry, update_from_gamma::update_from_gamma},
+    messages::{ConnectionManagerMsg, Record, RegistryMsg},
 };
 
 pub async fn registry_task(
     mut inbox: mpsc::Receiver<RegistryMsg>,
     conn_mgr: mpsc::Sender<ConnectionManagerMsg>,
+    write_queue: mpsc::Sender<Record>,
     token: CancellationToken,
     client: Arc<impl APIClient>,
     config: Arc<Config>,
     clock: SharedClock,
-) {
+) -> Result<()> {
     let mut registry = Registry::new(config.clone());
     let mut tick = time::interval(Duration::from_secs(config.registry_interval_s));
 
     loop {
         tokio::select! {
-            _ = token.cancelled() => {
-                break;
-            }
-            _ = tick.tick() => {
-                match fetch_markets_from_gamma(client.clone(), &mut registry, config.clone(), clock.clone(), token.clone()).await {
-                    Err(e) => {
-                        tracing::warn!(error = format!("{e:#}"), "registry update failed");
-                    }
-                    Ok(Some(changes)) => {
-                        if conn_mgr.send(ConnectionManagerMsg::TokenChanges(changes)).await.is_err() {
-                            tracing::error!("connection manager gone, registry exiting");
-                            break;
-                        }
-                    }
-                    _ => { /* cancelled */ }
-                }
-            }
+            _ = token.cancelled() => return Ok(()),
+
+            _ = tick.tick() => update_from_gamma(
+                    client.clone(),
+                    &mut registry,
+                    conn_mgr.clone(),
+                    write_queue.clone(),
+                    config.clone(),
+                    clock.clone(),
+                    token.clone()
+                ).await.context("failed to update registry from gamma")?,
+
             Some(msg) = inbox.recv() => match msg {
                 RegistryMsg::MarketResolved(id) => {
                     registry.resolve_from_websocket(&id, clock.now());
                 }
                 RegistryMsg::NewMarketSeen => {
                     tracing::debug!("early update of registry triggered");
-                    if let Err(e) = fetch_markets_from_gamma(client.clone(), &mut registry, config.clone(), clock.clone(), token.clone()) .await {
-                        tracing::warn!(error = format!("{e:#}"), "registry update failed");
-                    }
+                    update_from_gamma(
+                        client.clone(),
+                        &mut registry,
+                        conn_mgr.clone(),
+                        write_queue.clone(),
+                        config.clone(),
+                        clock.clone(),
+                        token.clone()
+                    ).await.context("failed to update registry out of band from gamma")?;
                 }
             },
-            else => break,
+
+            else => return Ok(()),
         }
     }
 }

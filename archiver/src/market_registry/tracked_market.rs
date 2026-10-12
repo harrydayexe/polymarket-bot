@@ -1,7 +1,6 @@
 use anyhow::anyhow;
 use chrono::{DateTime, Utc};
 use marcasite::{
-    clob::Token,
     gamma::Market,
     types::{ConditionId, TokenId},
 };
