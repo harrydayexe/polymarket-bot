@@ -15,6 +15,8 @@ clap-verbosity-flag = { version = "3.0.4", default-features = false, features = 
 env_logger = "0.11.11"
 futures = "0.3.34"
 futures-util = "0.3.34"
+humantime = "2.4.0"
+humantime-serde = "1.1.1"
 marcasite = { version = "0.1.0", default-features = false, features = [
     "clob",
     "data",

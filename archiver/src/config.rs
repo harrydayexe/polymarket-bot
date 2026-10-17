@@ -1,3 +1,4 @@
+use humantime::format_duration;
 use miette::{Diagnostic, NamedSource, SourceSpan};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -54,25 +55,37 @@ pub struct Config {
     pub archive_dir: PathBuf,
     pub category_tags: Vec<String>,
     pub min_liquidity_usd: Decimal,
+    #[serde(with = "humantime_serde")]
     pub registry_interval: Duration,
+    #[serde(with = "humantime_serde")]
     pub closed_grace_period: Duration,
     pub tokens_per_connection: usize,
+    #[serde(with = "humantime_serde")]
     pub heartbeat_interval: Duration,
+    #[serde(with = "humantime_serde")]
     pub heartbeat_timeout: Duration,
     /// How long a connection may take to open its socket, and then to send its subscribe.
+    #[serde(with = "humantime_serde")]
     pub connect_timeout: Duration,
+    #[serde(with = "humantime_serde")]
     pub backoff_initial: Duration,
+    #[serde(with = "humantime_serde")]
     pub backoff_max: Duration,
     /// How long a connection must stream before its backoff sequence starts again from
     /// `backoff_initial`.
+    #[serde(with = "humantime_serde")]
     pub backoff_reset_after: Duration,
+    #[serde(with = "humantime_serde")]
     pub snapshot_interval: Duration,
     pub snapshot_batch_size: usize,
     pub snapshot_max_requests_per_s: u64,
     pub write_queue_capacity: usize,
+    #[serde(with = "humantime_serde")]
     pub flush_interval: Duration,
+    #[serde(with = "humantime_serde")]
     pub sync_interval: Duration,
-    pub raw_retention_days: Duration,
+    #[serde(with = "humantime_serde")]
+    pub raw_retention: Duration,
     pub min_free_disk_gb: u64,
     pub websocket_url: url::Url,
     pub clob_rest_url: String,
@@ -101,7 +114,7 @@ impl Default for Config {
             write_queue_capacity: 100_000,
             flush_interval: Duration::from_secs(1),
             sync_interval: Duration::from_secs(5),
-            raw_retention_days: Duration::from_hours(90 * 24),
+            raw_retention: Duration::from_hours(90 * 24),
             min_free_disk_gb: 10,
             websocket_url: Url::parse("wss://ws-subscriptions-clob.polymarket.com/ws/market")
                 .unwrap(),
@@ -147,10 +160,18 @@ impl Config {
         for (key, value) in non_zero {
             ensure!(value > 0, "{key} must be greater than 0");
         }
-        ensure!(
-            !self.connect_timeout.is_zero(),
-            "connect_timeout must be greater than 0"
-        );
+        let non_zero_durations = [
+            ("registry_interval", self.registry_interval),
+            ("heartbeat_interval", self.heartbeat_interval),
+            ("connect_timeout", self.connect_timeout),
+            ("backoff_initial", self.backoff_initial),
+            ("snapshot_interval", self.snapshot_interval),
+            ("flush_interval", self.flush_interval),
+            ("sync_interval", self.sync_interval),
+        ];
+        for (key, value) in non_zero_durations {
+            ensure!(!value.is_zero(), "{key} must be greater than 0");
+        }
 
         ensure!(
             self.min_liquidity_usd >= Decimal::ZERO,
@@ -160,14 +181,14 @@ impl Config {
         ensure!(
             self.heartbeat_timeout > self.heartbeat_interval,
             "heartbeat_timeout ({}) must be longer than heartbeat_interval ({})",
-            self.heartbeat_timeout.as_secs(),
-            self.heartbeat_interval.as_secs()
+            format_duration(self.heartbeat_timeout),
+            format_duration(self.heartbeat_interval)
         );
         ensure!(
             self.backoff_initial <= self.backoff_max,
             "backoff_initial ({}) must not exceed backoff_max ({})",
-            self.backoff_initial.as_secs(),
-            self.backoff_max.as_secs()
+            format_duration(self.backoff_initial),
+            format_duration(self.backoff_max)
         );
         ensure!(
             self.snapshot_batch_size <= 500,
@@ -179,7 +200,7 @@ impl Config {
             "category_tags must not be empty"
         );
         ensure!(
-            self.websocket_url.scheme() == "wss" || self.websocket_url.scheme() == "wss",
+            self.websocket_url.scheme() == "ws" || self.websocket_url.scheme() == "wss",
             "websocket_url must start with ws:// or wss://"
         );
         for (key, url) in [
@@ -255,46 +276,52 @@ mod tests {
     }
 
     #[test]
+    fn duration_value_is_parsed() {
+        let config = parse("closed_grace_period = \"6h 30m\"").unwrap();
+        assert_eq!(config.closed_grace_period, Duration::from_mins(390));
+    }
+
+    #[test]
     fn negative_interval_is_refused() {
-        let (_, spanned) = parse_err("heartbeat_interval_s = -5");
-        assert_eq!(spanned, "-5");
+        let (_, spanned) = parse_err("heartbeat_interval = \"-5s\"");
+        assert_eq!(spanned, "\"-5s\"");
+    }
+
+    #[test]
+    fn unitless_duration_is_refused() {
+        let (_, spanned) = parse_err("heartbeat_interval = 5");
+        assert_eq!(spanned, "5");
     }
 
     #[test]
     fn zero_interval_is_refused() {
-        let msg = validation_err("registry_interval_s = 0");
+        let msg = validation_err("registry_interval = \"0s\"");
         assert!(
-            msg.contains("registry_interval_s must be greater than 0"),
+            msg.contains("registry_interval must be greater than 0"),
             "{msg}"
         );
     }
 
     #[test]
-    fn negative_grace_is_refused() {
-        let msg = validation_err("closed_grace_period_h = -5");
-        assert!(msg.contains("closed_grace_period_h"), "{msg}");
-    }
-
-    #[test]
     fn heartbeat_timeout_shorter_than_interval_is_refused() {
-        let msg = validation_err("heartbeat_interval_s = 30\nheartbeat_timeout_s = 10");
+        let msg = validation_err("heartbeat_interval = \"30s\"\nheartbeat_timeout = \"10s\"");
         assert!(
-            msg.contains("heartbeat_timeout_s (10) must be longer"),
+            msg.contains("heartbeat_timeout (10s) must be longer"),
             "{msg}"
         );
     }
 
     #[test]
     fn heartbeat_timeout_equal_to_interval_is_refused() {
-        let msg = validation_err("heartbeat_interval_s = 10\nheartbeat_timeout_s = 10");
-        assert!(msg.contains("heartbeat_timeout_s"), "{msg}");
+        let msg = validation_err("heartbeat_interval = \"10s\"\nheartbeat_timeout = \"10s\"");
+        assert!(msg.contains("heartbeat_timeout"), "{msg}");
     }
 
     #[test]
     fn backoff_initial_above_max_is_refused() {
-        let msg = validation_err("backoff_initial_s = 120");
+        let msg = validation_err("backoff_initial = \"2m\"");
         assert!(
-            msg.contains("backoff_initial_s (120) must not exceed"),
+            msg.contains("backoff_initial (2m) must not exceed"),
             "{msg}"
         );
     }
