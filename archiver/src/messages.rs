@@ -33,7 +33,7 @@ pub enum Record {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlBody {
     RunStart {
         program_version: String,
@@ -89,7 +89,7 @@ pub enum ControlBody {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapshotReason {
     Subscribe,
     NewToken,
@@ -98,7 +98,7 @@ pub enum SnapshotReason {
     MissingBook,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GapReason {
     ConnectFailed { error: String },
     ConnectionClosed { error: String },

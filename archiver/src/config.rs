@@ -59,8 +59,13 @@ pub struct Config {
     pub tokens_per_connection: usize,
     pub heartbeat_interval: Duration,
     pub heartbeat_timeout: Duration,
+    /// How long a connection may take to open its socket, and then to send its subscribe.
+    pub connect_timeout: Duration,
     pub backoff_initial: Duration,
     pub backoff_max: Duration,
+    /// How long a connection must stream before its backoff sequence starts again from
+    /// `backoff_initial`.
+    pub backoff_reset_after: Duration,
     pub snapshot_interval: Duration,
     pub snapshot_batch_size: usize,
     pub snapshot_max_requests_per_s: u64,
@@ -86,8 +91,10 @@ impl Default for Config {
             tokens_per_connection: 250,
             heartbeat_interval: Duration::from_secs(10),
             heartbeat_timeout: Duration::from_secs(30),
+            connect_timeout: Duration::from_secs(10),
             backoff_initial: Duration::from_secs(1),
             backoff_max: Duration::from_secs(60),
+            backoff_reset_after: Duration::from_mins(5),
             snapshot_interval: Duration::from_mins(60),
             snapshot_batch_size: 500,
             snapshot_max_requests_per_s: 2,
@@ -140,6 +147,10 @@ impl Config {
         for (key, value) in non_zero {
             ensure!(value > 0, "{key} must be greater than 0");
         }
+        ensure!(
+            !self.connect_timeout.is_zero(),
+            "connect_timeout must be greater than 0"
+        );
 
         ensure!(
             self.min_liquidity_usd >= Decimal::ZERO,

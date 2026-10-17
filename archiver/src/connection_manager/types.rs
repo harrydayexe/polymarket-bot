@@ -22,7 +22,9 @@ impl ConnAttemptId {
     }
 }
 
-#[derive(Debug, PartialEq)]
+/// There is no `Closing` state as in the design doc: closing is a single step (the manager
+/// carries out `CloseSocket`), so a connection goes straight to `Closed`, which is terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
     Connecting {
         started_at: Instant,
@@ -41,55 +43,77 @@ pub enum ConnectionState {
     Closed,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionEvent {
-    SocketOpened,
+    /// Something reported by the socket tasks of one connection attempt. Tagged with the
+    /// attempt so events from an earlier, already abandoned socket can be told apart from
+    /// the current one.
+    Socket {
+        attempt_id: ConnAttemptId,
+        event: SocketEvent,
+    },
+    /// Regular timer tick (e.g. every 100ms).
+    Tick {
+        /// Latest value of the socket reader's last-message time, copied in by the manager.
+        last_message_at: Option<DateTime<Utc>>,
+    },
+    TokensAssigned {
+        tokens: HashSet<TokenId>,
+    },
+    TokensRemoved {
+        tokens: HashSet<TokenId>,
+    },
+    Shutdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SocketEvent {
+    Opened,
     /// The socket could not connect.
-    SocketFailed {
+    Failed {
         error: String,
     },
-    SocketClosed {
+    Closed {
         reason: String,
     },
     SendFailed {
         error: String,
     },
+    SubscribeSent,
     PongReceived {
         at: Instant,
     },
-    /// Regular timer tick (e.g. every 100ms).
-    Tick,
-    TokensAssigned {
-        tokens: HashSet<TokenId>,
-    },
-    SubscribeSent,
-    TokensRemoved {
-        tokens: HashSet<TokenId>,
-    },
     /// This connection's frames were dropped
     QueueOverflow,
-    Shutdown,
 }
 
 impl Display for ConnectionEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ConnectionEvent::SocketOpened => write!(f, "SocketOpened"),
-            ConnectionEvent::SocketFailed { error: _ } => write!(f, "SocketFailed"),
-            ConnectionEvent::SocketClosed { reason: _ } => write!(f, "SocketClosed"),
-            ConnectionEvent::SendFailed { error: _ } => write!(f, "SendFailed"),
-            ConnectionEvent::PongReceived { at: _ } => write!(f, "PongReceived"),
-            ConnectionEvent::Tick => write!(f, "Tick"),
-            ConnectionEvent::TokensAssigned { tokens: _ } => write!(f, "TokensAssigned"),
-            ConnectionEvent::SubscribeSent => write!(f, "SubscribeSent"),
-            ConnectionEvent::TokensRemoved { tokens: _ } => write!(f, "TokensRemoved"),
-            ConnectionEvent::QueueOverflow => write!(f, "QueueOverflow"),
+            ConnectionEvent::Socket { attempt_id, event } => write!(f, "{event} ({attempt_id})"),
+            ConnectionEvent::Tick { .. } => write!(f, "Tick"),
+            ConnectionEvent::TokensAssigned { .. } => write!(f, "TokensAssigned"),
+            ConnectionEvent::TokensRemoved { .. } => write!(f, "TokensRemoved"),
             ConnectionEvent::Shutdown => write!(f, "Shutdown"),
         }
     }
 }
 
-#[derive(Debug)]
+impl Display for SocketEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SocketEvent::Opened => write!(f, "SocketOpened"),
+            SocketEvent::Failed { .. } => write!(f, "SocketFailed"),
+            SocketEvent::Closed { .. } => write!(f, "SocketClosed"),
+            SocketEvent::SendFailed { .. } => write!(f, "SendFailed"),
+            SocketEvent::SubscribeSent => write!(f, "SubscribeSent"),
+            SocketEvent::PongReceived { .. } => write!(f, "PongReceived"),
+            SocketEvent::QueueOverflow => write!(f, "QueueOverflow"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionAction {
     OpenSocket {
         url: url::Url,

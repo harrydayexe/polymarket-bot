@@ -772,6 +772,18 @@ Gaps will happen; the requirement is that every gap is recorded, so that nobody 
 
 **Gap records.** `gap_open` carries the tokens, the start time (the last message received on that connection, not the time the problem was noticed) and the reason. `gap_close` carries the time the stream resumed. The gap is only fully healed once a full book has been recorded afterwards; readers work this out by finding the first `book` or snapshot after the `gap_close`.
 
+**Gap contract.** These are the rules analysis tools can rely on when reading the control stream. They are enforced by the connection state machine's tests, including a randomised test that checks them over thousands of event sequences.
+
+- Within a run, a token's data is covered from its `subscribe` until its next `gap_open` or `unsubscribe`. It is trustworthy from the first full book after that `subscribe` or `gap_close`.
+- Every `gap_open` in a run is closed in that same run. The `gap_close` reason says why:
+  - `resumed`: the stream came back.
+  - `unsubscribed`: the token stopped being tracked.
+  - `shutdown`: the run stopped cleanly. A `shutdown` close does **not** mean data resumed.
+- Every `connect` is followed by a matching `disconnect` before the next `connect` on that slot. A failed connection attempt that never opened writes neither.
+- Nothing is covered between a `run_stop` and the next `run_start`. Tokens are only covered again once the new run subscribes them.
+- A run that ended without a `run_stop` (a crash) is covered by a `process_restart` gap written at the start of the next run.
+- A gap starts at the last message received on that connection attempt. If the attempt received nothing, it starts at the time the problem was detected, which can be up to `heartbeat_timeout` after the socket actually died. In that case there was also no book since the last `gap_close`, so the rule above already marks the data as not trustworthy.
+
 **Why drop frames when the queue is full rather than wait?** Waiting would stall the socket reader, the server would eventually disconnect, and the loss would be larger and harder to date. Dropping, recording, and reconnecting gives a small, clearly marked gap. In practice the queue should never fill; if it does, something is wrong with the disk and should be investigated.
 
 **Duplicates are kept.** After a reconnect the exchange may resend recent data. The archiver records it as received and never removes duplicates; that is the reader's job.
