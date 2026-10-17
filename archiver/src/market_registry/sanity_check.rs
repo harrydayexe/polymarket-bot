@@ -17,7 +17,7 @@ pub fn sanity_check(
         return Ok(());
     }
 
-    let threshold = last_accepted_count / 2;
+    let threshold = last_accepted_count.div_ceil(2);
     match fetched_count >= threshold {
         true => Ok(()),
         false => Err(NotEnoughMarketsError {
@@ -52,6 +52,12 @@ mod tests {
     #[test]
     fn empty_response_with_300_tracked_is_rejected() {
         assert!(sanity_check(0, 300).is_err());
+    }
+
+    #[test]
+    fn threshold_rounds_up() {
+        assert!(sanity_check(150, 301).is_err());
+        assert!(sanity_check(151, 301).is_ok());
     }
 
     #[test]

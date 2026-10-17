@@ -17,13 +17,13 @@ pub async fn execute(_args: CommonArgs, token: CancellationToken) -> anyhow::Res
     println!("Running Archiver...");
 
     let config = Arc::new(Config::load(&_args.config)?);
-    let client = Arc::new(MarcasiteClient::new(config.clone()));
+    let client = Arc::new(MarcasiteClient::connect(&config).await?);
     let clock = Arc::new(SystemClock);
 
     let tracker = TaskTracker::new();
     let registry_token = token.child_token();
 
-    let (registry_tx, registry_rx) = mpsc::channel::<RegistryMsg>(64);
+    let (registry_tx, registry_rx) = mpsc::unbounded_channel::<RegistryMsg>();
     let (conn_mgr_tx, conn_mgr_rx) = mpsc::channel::<ConnectionManagerMsg>(256);
     let (write_tx, write_rx) = mpsc::channel::<Record>(10_000);
 

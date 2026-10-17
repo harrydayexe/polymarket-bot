@@ -1,18 +1,25 @@
 use std::{collections::HashSet, fmt::Display};
 
 use chrono::{DateTime, Utc};
-use marcasite::{data::TokenId, types::ConditionId};
+use marcasite::types::{ConditionId, TokenId};
 
 use crate::{
     connection_manager::types::{ConnAttemptId, ConnSlotId},
-    market_registry::{registry::PlannedChanges, token_changes::TokenChanges},
+    market_registry::{
+        market_info::MarketInfo, registry::MarketChange, token_changes::TokenChanges,
+    },
     types::RunId,
 };
 
 #[derive(Debug)]
 pub enum RegistryMsg {
-    MarketResolved(ConditionId),
-    NewMarketSeen,
+    /// A `market_resolved` frame, received at `at`.
+    MarketResolved {
+        condition_id: ConditionId,
+        at: DateTime<Utc>,
+    },
+    /// A `new_market` frame. Triggers an early refresh.
+    NewMarketSeen { condition_id: ConditionId },
 }
 
 #[derive(Debug)]
@@ -24,7 +31,8 @@ pub enum ConnectionManagerMsg {
 pub enum Record {
     Market {
         recv_ts: DateTime<Utc>,
-        changes: PlannedChanges,
+        market: MarketInfo,
+        change: MarketChange,
     },
     Control {
         recv_ts: DateTime<Utc>,

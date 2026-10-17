@@ -1,28 +1,53 @@
-use std::sync::Arc;
-
 use tokio_util::sync::CancellationToken;
 
-use crate::client::MarcasiteClient;
+use crate::cli::CommonArgs;
+use crate::client::{APIClient, MarcasiteClient};
 use crate::clock::{Clock, SystemClock};
 use crate::config::Config;
-use crate::market_registry::fetch_from_gamma::fetch_from_gamma;
-use crate::market_registry::registry::Registry;
+use crate::market_registry::selection::{parse_markets, select};
 
-use crate::cli::CommonArgs;
-
+/// Print the markets the registry would select right now, with counts. Changes nothing.
 pub async fn execute(args: CommonArgs, token: CancellationToken) -> anyhow::Result<()> {
-    let config = Arc::new(Config::load(&args.config)?);
-    let client = Arc::new(MarcasiteClient::new(config.clone()));
-    let mut registry = Registry::new(config.clone());
-    let clock = Arc::new(SystemClock);
+    let config = Config::load(&args.config)?;
 
-    let Some(plan) = fetch_from_gamma(client, &mut registry, config, clock.now(), token).await?
-    else {
-        return Ok(());
+    let fetch = async {
+        let client = MarcasiteClient::connect(&config).await?;
+        client.fetch_open_markets().await
+    };
+    let markets = tokio::select! {
+        _ = token.cancelled() => return Ok(()),
+        markets = fetch => markets?,
     };
 
-    println!("Discovered Markets:");
-    println!("{}", plan);
+    let fetched = markets.len();
+    let (parsed, skipped) = parse_markets(markets, SystemClock.now());
+    let mut selected: Vec<_> = parsed
+        .iter()
+        .filter(|market| select(market, &config))
+        .collect();
+    selected.sort_by(|a, b| a.question.cmp(&b.question));
+
+    for market in &skipped {
+        println!(
+            "Skipped {}: {}",
+            market
+                .condition_id
+                .as_ref()
+                .map_or("market without condition ID".to_string(), |id| id
+                    .to_string()),
+            market.reason
+        );
+    }
+    for market in &selected {
+        println!("{}", market.question);
+    }
+    println!();
+    println!(
+        "{fetched} fetched, {} skipped as malformed, {} selected ({} tokens)",
+        skipped.len(),
+        selected.len(),
+        selected.len() * 2
+    );
 
     Ok(())
 }
