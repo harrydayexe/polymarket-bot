@@ -3,8 +3,10 @@ mod client;
 mod clock;
 mod commands;
 mod config;
+mod connection_manager;
 mod market_registry;
 mod messages;
+mod types;
 
 use std::process::ExitCode;
 

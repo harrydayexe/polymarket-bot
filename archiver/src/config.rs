@@ -2,8 +2,12 @@ use miette::{Diagnostic, NamedSource, SourceSpan};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use thiserror::Error;
+use url::Url;
 
 macro_rules! ensure {
     ($cond:expr, $($arg:tt)+) => {
@@ -50,22 +54,22 @@ pub struct Config {
     pub archive_dir: PathBuf,
     pub category_tags: Vec<String>,
     pub min_liquidity_usd: Decimal,
-    pub registry_interval_s: u64,
-    pub closed_grace_period_h: i64,
+    pub registry_interval: Duration,
+    pub closed_grace_period: Duration,
     pub tokens_per_connection: usize,
-    pub heartbeat_interval_s: u64,
-    pub heartbeat_timeout_s: u64,
-    pub backoff_initial_s: u64,
-    pub backoff_max_s: u64,
-    pub snapshot_interval_min: u64,
+    pub heartbeat_interval: Duration,
+    pub heartbeat_timeout: Duration,
+    pub backoff_initial: Duration,
+    pub backoff_max: Duration,
+    pub snapshot_interval: Duration,
     pub snapshot_batch_size: usize,
     pub snapshot_max_requests_per_s: u64,
     pub write_queue_capacity: usize,
-    pub flush_interval_s: u64,
-    pub sync_interval_s: u64,
-    pub raw_retention_days: u32,
+    pub flush_interval: Duration,
+    pub sync_interval: Duration,
+    pub raw_retention_days: Duration,
     pub min_free_disk_gb: u64,
-    pub websocket_url: String,
+    pub websocket_url: url::Url,
     pub clob_rest_url: String,
     pub gamma_url: String,
     pub log_level: String,
@@ -77,22 +81,23 @@ impl Default for Config {
             archive_dir: "./archive".into(),
             category_tags: vec!["politics".into(), "geopolitics".into()],
             min_liquidity_usd: dec!(1000),
-            registry_interval_s: 300,
-            closed_grace_period_h: 6,
+            registry_interval: Duration::from_secs(300),
+            closed_grace_period: Duration::from_hours(6),
             tokens_per_connection: 250,
-            heartbeat_interval_s: 10,
-            heartbeat_timeout_s: 30,
-            backoff_initial_s: 1,
-            backoff_max_s: 60,
-            snapshot_interval_min: 60,
+            heartbeat_interval: Duration::from_secs(10),
+            heartbeat_timeout: Duration::from_secs(30),
+            backoff_initial: Duration::from_secs(1),
+            backoff_max: Duration::from_secs(60),
+            snapshot_interval: Duration::from_mins(60),
             snapshot_batch_size: 500,
             snapshot_max_requests_per_s: 2,
             write_queue_capacity: 100_000,
-            flush_interval_s: 1,
-            sync_interval_s: 5,
-            raw_retention_days: 90,
+            flush_interval: Duration::from_secs(1),
+            sync_interval: Duration::from_secs(5),
+            raw_retention_days: Duration::from_hours(90 * 24),
             min_free_disk_gb: 10,
-            websocket_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market".into(),
+            websocket_url: Url::parse("wss://ws-subscriptions-clob.polymarket.com/ws/market")
+                .unwrap(),
             clob_rest_url: "https://clob.polymarket.com".into(),
             gamma_url: "https://gamma-api.polymarket.com".into(),
             log_level: "info".into(),
@@ -124,31 +129,17 @@ impl Config {
 
     fn validate(&self) -> Result<(), ConfigError> {
         let non_zero = [
-            ("registry_interval_s", self.registry_interval_s),
             ("tokens_per_connection", self.tokens_per_connection as u64),
-            ("heartbeat_interval_s", self.heartbeat_interval_s),
-            ("heartbeat_timeout_s", self.heartbeat_timeout_s),
-            ("backoff_initial_s", self.backoff_initial_s),
-            ("backoff_max_s", self.backoff_max_s),
-            ("snapshot_interval_min", self.snapshot_interval_min),
             ("snapshot_batch_size", self.snapshot_batch_size as u64),
             (
                 "snapshot_max_requests_per_s",
                 self.snapshot_max_requests_per_s,
             ),
             ("write_queue_capacity", self.write_queue_capacity as u64),
-            ("flush_interval_s", self.flush_interval_s),
-            ("sync_interval_s", self.sync_interval_s),
         ];
         for (key, value) in non_zero {
             ensure!(value > 0, "{key} must be greater than 0");
         }
-
-        ensure!(
-            self.closed_grace_period_h >= 0,
-            "closed_grace_period_h must be a non-negative number, got {}",
-            self.closed_grace_period_h
-        );
 
         ensure!(
             self.min_liquidity_usd >= Decimal::ZERO,
@@ -156,16 +147,16 @@ impl Config {
             self.min_liquidity_usd
         );
         ensure!(
-            self.heartbeat_timeout_s > self.heartbeat_interval_s,
-            "heartbeat_timeout_s ({}) must be longer than heartbeat_interval_s ({})",
-            self.heartbeat_timeout_s,
-            self.heartbeat_interval_s
+            self.heartbeat_timeout > self.heartbeat_interval,
+            "heartbeat_timeout ({}) must be longer than heartbeat_interval ({})",
+            self.heartbeat_timeout.as_secs(),
+            self.heartbeat_interval.as_secs()
         );
         ensure!(
-            self.backoff_initial_s <= self.backoff_max_s,
-            "backoff_initial_s ({}) must not exceed backoff_max_s ({})",
-            self.backoff_initial_s,
-            self.backoff_max_s
+            self.backoff_initial <= self.backoff_max,
+            "backoff_initial ({}) must not exceed backoff_max ({})",
+            self.backoff_initial.as_secs(),
+            self.backoff_max.as_secs()
         );
         ensure!(
             self.snapshot_batch_size <= 500,
@@ -177,7 +168,7 @@ impl Config {
             "category_tags must not be empty"
         );
         ensure!(
-            self.websocket_url.starts_with("ws://") || self.websocket_url.starts_with("wss://"),
+            self.websocket_url.scheme() == "wss" || self.websocket_url.scheme() == "wss",
             "websocket_url must start with ws:// or wss://"
         );
         for (key, url) in [
@@ -237,7 +228,7 @@ mod tests {
         let default = Config::default();
         assert_eq!(format!("{config:?}"), format!("{default:?}"));
         assert_eq!(config.tokens_per_connection, 250);
-        assert_eq!(config.heartbeat_timeout_s, 30);
+        assert_eq!(config.heartbeat_timeout, Duration::from_secs(30));
     }
 
     #[test]

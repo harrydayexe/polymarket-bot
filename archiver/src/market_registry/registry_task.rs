@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use tokio::{sync::mpsc, time};
 use tokio_util::sync::CancellationToken;
@@ -22,7 +22,7 @@ pub async fn registry_task(
     clock: SharedClock,
 ) -> Result<()> {
     let mut registry = Registry::new(config.clone());
-    let mut tick = time::interval(Duration::from_secs(config.registry_interval_s));
+    let mut tick = time::interval(config.registry_interval);
 
     loop {
         tokio::select! {

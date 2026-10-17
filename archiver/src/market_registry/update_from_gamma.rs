@@ -8,8 +8,8 @@ use crate::{
     client::APIClient,
     clock::SharedClock,
     config::Config,
-    market_registry::{registry::Registry, token_changes::TokenChanges},
-    messages::{ConnectionManagerMsg, Record},
+    market_registry::{not_enough_markets_error::NotEnoughMarketsError, registry::Registry},
+    messages::{ConnectionManagerMsg, ControlBody, Record},
 };
 
 pub(super) async fn update_from_gamma(
@@ -36,6 +36,13 @@ pub(super) async fn update_from_gamma(
 
             let plan = match registry.plan_changes(results, at).await {
                 Err(e) => {
+                    if let Some(sc_err) = e.downcast_ref::<NotEnoughMarketsError>() {
+                        write_queue.send(Record::Control {
+                            recv_ts: clock.now(),
+                            conn_id: None,
+                            body: ControlBody::RegistryRejected { reason: sc_err.to_string(), fetched: sc_err.fetched_count, previous: sc_err.last_accepted_count }
+                        });
+                    }
                     tracing::warn!(error = format!("{e:#}"), "planning registry changes failed");
                     return Ok(());
                 }

@@ -6,10 +6,10 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use crate::{
     cli::CommonArgs,
     client::MarcasiteClient,
-    clock::SystemClock,
+    clock::{Clock, SystemClock},
     config::Config,
     market_registry::registry_task::registry_task,
-    messages::{ConnectionManagerMsg, Record, RegistryMsg},
+    messages::{ConnectionManagerMsg, ControlBody, Record, RegistryMsg},
 };
 
 pub async fn execute(_args: CommonArgs, token: CancellationToken) -> anyhow::Result<()> {
@@ -33,7 +33,7 @@ pub async fn execute(_args: CommonArgs, token: CancellationToken) -> anyhow::Res
         registry_token,
         client,
         config,
-        clock,
+        clock.clone(),
     ));
 
     // No more tasks to be added.
@@ -53,7 +53,15 @@ pub async fn execute(_args: CommonArgs, token: CancellationToken) -> anyhow::Res
     }
 
     // TODO: add the control message
-    let _ = timeout(Duration::from_secs(1), write_tx.send(Record::Control)).await;
+    let _ = timeout(
+        Duration::from_secs(1),
+        write_tx.send(Record::Control {
+            recv_ts: clock.now(),
+            conn_id: None,
+            body: ControlBody::RunStop { clean },
+        }),
+    )
+    .await;
     drop(write_tx);
 
     // TODO: Spawn writer and use it here. Do not use tracker for this

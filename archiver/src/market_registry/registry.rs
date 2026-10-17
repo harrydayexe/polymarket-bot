@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::{DateTime, Utc};
 use marcasite::{
     Paginated,
     gamma::Market,
@@ -76,7 +76,7 @@ impl Registry {
         match self.markets.get_mut(id) {
             Some(market) if market.status == MarketStatus::Tracking => {
                 market.status = MarketStatus::Closing {
-                    grace_until: at + TimeDelta::hours(self.config.closed_grace_period_h),
+                    grace_until: at + self.config.closed_grace_period,
                     cause: ClosingCause::ClosedOnWebSocket,
                 };
                 true
@@ -210,7 +210,7 @@ impl Registry {
                         let mut updated_tm = v.clone();
                         updated_tm.update_from(&market);
                         updated_tm.status = MarketStatus::Closing {
-                            grace_until: at + TimeDelta::hours(self.config.closed_grace_period_h),
+                            grace_until: at + self.config.closed_grace_period,
                             cause: ClosingCause::ClosedOnGamma,
                         };
                         details_changed.insert(k.clone(), updated_tm);
