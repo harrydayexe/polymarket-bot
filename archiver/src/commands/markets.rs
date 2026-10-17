@@ -16,10 +16,10 @@ pub async fn execute(args: CommonArgs, token: CancellationToken) -> anyhow::Resu
     let mut registry = Registry::new(config.clone());
     let clock = Arc::new(SystemClock);
 
-    let plan = fetch_from_gamma(client, &mut registry, config, clock.now(), token)
-        .await
-        .unwrap()
-        .unwrap();
+    let Some(plan) = fetch_from_gamma(client, &mut registry, config, clock.now(), token).await?
+    else {
+        return Ok(());
+    };
 
     println!("Discovered Markets:");
     println!("{}", plan);

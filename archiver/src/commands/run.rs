@@ -1,5 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
+use futures::FutureExt;
 use tokio::{sync::mpsc, time::timeout};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -26,14 +27,18 @@ pub async fn execute(_args: CommonArgs, token: CancellationToken) -> anyhow::Res
     let (conn_mgr_tx, conn_mgr_rx) = mpsc::channel::<ConnectionManagerMsg>(256);
     let (write_tx, write_rx) = mpsc::channel::<Record>(10_000);
 
-    tracker.spawn(registry_task(
-        registry_rx,
-        conn_mgr_tx.clone(),
-        write_tx.clone(),
-        registry_token,
-        client,
-        config,
-        clock.clone(),
+    let registry = tracker.spawn(supervise(
+        "registry",
+        token.clone(),
+        registry_task(
+            registry_rx,
+            conn_mgr_tx.clone(),
+            write_tx.clone(),
+            registry_token,
+            client,
+            config,
+            clock.clone(),
+        ),
     ));
 
     // No more tasks to be added.
@@ -51,6 +56,10 @@ pub async fn execute(_args: CommonArgs, token: CancellationToken) -> anyhow::Res
     if !clean {
         tracing::warn!("tasks did not shut down within 10s");
     }
+
+    // A task that is unfinished, panicked or returned an error makes the stop unclean.
+    let failed = !matches!(registry.now_or_never(), Some(Ok(true)));
+    let clean = clean && !failed;
 
     // TODO: add the control message
     let _ = timeout(
@@ -71,5 +80,30 @@ pub async fn execute(_args: CommonArgs, token: CancellationToken) -> anyhow::Res
 
     // TODO: mark clean_stop = clean in the status file
 
+    if failed {
+        anyhow::bail!("a task failed, see the log for details");
+    }
+
     Ok(())
+}
+
+/// Run a task to completion. On error, log it and cancel `shutdown` so the rest of the
+/// process stops too.
+///
+/// # Returns
+///
+/// `true` if the task finished without error.
+async fn supervise(
+    name: &'static str,
+    shutdown: CancellationToken,
+    task: impl Future<Output = anyhow::Result<()>>,
+) -> bool {
+    match task.await {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::error!(task = name, error = format!("{e:#}"), "task failed");
+            shutdown.cancel();
+            false
+        }
+    }
 }

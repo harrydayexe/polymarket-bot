@@ -94,6 +94,7 @@ impl Registry {
         }
     }
 
+    /// Insert or replace markets, recording only the tokens that actually change.
     fn insert_or_update(
         &mut self,
         map: &HashMap<ConditionId, TrackedMarket>,
@@ -101,11 +102,22 @@ impl Registry {
         removed: &mut HashSet<TokenId>,
     ) {
         for (id, market) in map {
-            added.insert(market.yes_token.clone());
-            added.insert(market.no_token.clone());
-            if let Some(old_market) = self.markets.insert(id.clone(), market.clone()) {
-                removed.insert(old_market.yes_token);
-                removed.insert(old_market.no_token);
+            let new_tokens = [market.yes_token.clone(), market.no_token.clone()];
+            let old_tokens = self
+                .markets
+                .insert(id.clone(), market.clone())
+                .map(|old| vec![old.yes_token, old.no_token])
+                .unwrap_or_default();
+
+            for token in &new_tokens {
+                if !old_tokens.contains(token) {
+                    added.insert(token.clone());
+                }
+            }
+            for token in old_tokens {
+                if !new_tokens.contains(&token) {
+                    removed.insert(token);
+                }
             }
         }
     }
@@ -141,21 +153,9 @@ impl Registry {
             .collect()
     }
 
-    /// Check if a market should be selected.
-    ///
-    /// The criteria checked is: Tradability, Category, and Liquidity.
-    fn should_select(&self, market: &TrackedMarket, _config: Arc<Config>) -> bool {
-        // Recently Removed Check
-        if self.recently_removed.contains_key(&market.condition_id) {
-            return false;
-        }
-
-        // Tradability Check
-        if !market.active || market.closed || !market.accepting_orders {
-            return false;
-        }
-
-        true
+    /// Check if a market is tradable. Category and liquidity are filtered by the Gamma query.
+    fn should_select(&self, market: &TrackedMarket) -> bool {
+        market.active && !market.closed && market.accepting_orders
     }
 
     pub(super) async fn plan_changes(
@@ -199,7 +199,7 @@ impl Registry {
             match tm {
                 // Market is not tracked
                 None => {
-                    if self.should_select(&market, self.config.clone()) {
+                    if self.should_select(&market) {
                         add.insert(market.condition_id.clone(), market);
                     }
                 }
@@ -217,7 +217,7 @@ impl Registry {
                     }
 
                     // Gamma shows as open and details have changed
-                    if !market.closed && !(v == &market) {
+                    if !market.closed && v != &market {
                         let mut updated_tm = v.clone();
                         updated_tm.update_from(&market);
                         details_changed.insert(k.clone(), updated_tm);

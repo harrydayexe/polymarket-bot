@@ -37,11 +37,14 @@ pub(super) async fn update_from_gamma(
             let plan = match registry.plan_changes(results, at).await {
                 Err(e) => {
                     if let Some(sc_err) = e.downcast_ref::<NotEnoughMarketsError>() {
-                        write_queue.send(Record::Control {
+                        let record = Record::Control {
                             recv_ts: clock.now(),
                             conn_id: None,
                             body: ControlBody::RegistryRejected { reason: sc_err.to_string(), fetched: sc_err.fetched_count, previous: sc_err.last_accepted_count }
-                        });
+                        };
+                        if write_queue.send(record).await.is_err() {
+                            return Err(anyhow::anyhow!("write queue gone, registry exiting"));
+                        }
                     }
                     tracing::warn!(error = format!("{e:#}"), "planning registry changes failed");
                     return Ok(());
