@@ -4,11 +4,11 @@ type: project
 ---
 # Implementation Status
 
-A comparison of the archiver as it stands (after the connection manager's websocket handling) against `docs/design.md`. This is an overview of what exists and what is missing, not a code review. Section numbers refer to the design document.
+A comparison of the archiver as it stands (after the snapshot worker) against `docs/design.md`. This is an overview of what exists and what is missing, not a code review. Section numbers refer to the design document.
 
 ## 1. Summary
 
-The project is in its foundation stage. Configuration loading, the market registry and the connection manager's websocket handling are complete: `archiver run` tracks markets, keeps websocket connections open for their tokens and turns every message into a record. Nothing yet writes to disk or takes a snapshot, so the records are discarded and `archiver run` does not record any data.
+The project is in its foundation stage. Configuration loading, the market registry, the connection manager's websocket handling and the snapshot worker are complete: `archiver run` tracks markets, keeps websocket connections open for their tokens, turns every message into a record and takes REST snapshots. Nothing yet writes to disk, so the records are discarded and `archiver run` does not record any data.
 
 | Area | Status |
 | --- | --- |
@@ -23,7 +23,7 @@ The project is in its foundation stage. Configuration loading, the market regist
 | Write queue (bounded, non-blocking) | Partial: bounded channel sized from config, frames put without waiting; no depth or high-water counters |
 | Writer, file layout, rotation, durability (8) | Not started |
 | Frame inspector | Not started |
-| Snapshot worker and rate limiter (9) | Not started |
+| Snapshot worker and rate limiter (5.7, 9) | Done (no `BooksSeen`) |
 | Status reporter, status file, health rules (13) | Not started |
 | Startup recovery, clean shutdown sequence (7, 12.1) | Not started |
 | Compactor, Parquet output (11) | Not started |
@@ -45,7 +45,7 @@ Differences from the design:
 - `registry_interval` defaults to 5 minutes, not 60 seconds.
 - The shipped `config.toml` sets `min_liquidity_usd = 2000000`, far above the design's 1,000 (presumably for development).
 - Command-line flags cannot override config values yet; the only flags are `--config` and verbosity.
-- `log_level` and `clob_rest_url` are validated but not used: logging is driven by the `-v` flag, and no CLOB REST client exists yet.
+- `log_level` is validated but not used: logging is driven by the `-v` flag.
 - A config error exits with code 78 rather than the design's 2.
 
 ### 2.2 Connection state machine (`src/connection_manager/connection.rs`, `types.rs`)
@@ -94,7 +94,7 @@ Differences from the design:
 
 ### 2.5 Records and messages (`src/messages.rs`)
 
-`ControlBody`, `GapReason` and `SnapshotReason` cover every case in section 5.6. `Record` has `WsFrame`, `Market` and `Control`. `WsFrame` holds marcasite's decoded `MarketEvent`, not the raw text (2.6). `ControlBody` has an extra `FrameDecodeFailed`; the `Snapshot` record does not exist yet, and records carry no `run_id` (the writer could add it). `Record::Market` matches the design (`market` plus `Added`/`Updated`). `ConnectionManagerMsg` has only `TokenChanges`, keyed by condition ID with both tokens: socket events go to the manager on its own internal channel and ticks come from its own timer, so there is no `ForConnection` or `Tick`, and no `BooksSeen` yet. `SnapshotMsg` has only `SnapshotRequest`. Shutdown goes through a `CancellationToken` rather than a `Shutdown` message, which is the idiomatic tokio choice.
+`ControlBody`, `GapReason` and `SnapshotReason` cover every case in section 5.6. `Record` has `WsFrame`, `Snapshot`, `Market` and `Control`. `WsFrame` holds marcasite's decoded `MarketEvent`, not the raw text (2.6). `ControlBody` has an extra `FrameDecodeFailed`; `Snapshot` holds marcasite's decoded `OrderBookSummary`s rather than the raw response (2.8), and records carry no `run_id` (the writer could add it). `Record::Market` matches the design (`market` plus `Added`/`Updated`). `ConnectionManagerMsg` has only `TokenChanges`, keyed by condition ID with both tokens: socket events go to the manager on its own internal channel and ticks come from its own timer, so there is no `ForConnection` or `Tick`, and no `BooksSeen` yet. `SnapshotMsg` has `SnapshotRequest` and `TokensTracked`, which the connection manager sends with every `TokenChanges` before acting on it. Shutdown goes through a `CancellationToken` rather than a `Shutdown` message, which is the idiomatic tokio choice.
 
 ### 2.6 Connection manager (`src/connection_manager/`)
 
@@ -105,7 +105,7 @@ Complete against sections 5.5, 5.7 (gap tracker) and 7, except `awaiting_book` (
 - **Socket task** (`socket.rs`), one per connection attempt, on `marcasite::ws::MarketChannel`. The manager configures the channel's URL, `connect_timeout`, heartbeat (`heartbeat_interval`) and idle timeout (`heartbeat_timeout`), and the task connects with a `MarketSubscription` for the attempt's tokens with `custom_feature_enabled`. It hands the channel's handle to the manager, which sends live subscribe and unsubscribe through it. Each event is stamped with its receive time (to the microsecond), published as `last_message_at` (an atomic), and `try_send` as a `WsFrame` record. A message that fails marcasite's schema decode cannot be archived, so it becomes a `frame_decode_failed` control record quoting marcasite's error (the first 256 bytes of the message). A timeout error becomes `TimedOut`; any other final error, or a normal close, becomes `Closed`. When the queue is full the task drops the record, reports `QueueOverflow` once, and reports the number dropped when the channel ends, which the manager writes as a `queue_overflow` control record. Closing cancels the task, which closes the channel and still records events received until the close completes.
 - **What the archive holds instead of raw text.** The design stores each frame's exact text (`raw`). The channel only yields decoded events, so the writer will serialise `MarketEvent` (marcasite's `Serialize`). That is not byte-identical to the wire: a frame holding an array becomes one record per element, unrecognised messages are kept as their JSON value (`MarketEvent::Unknown`), and recognised ones are re-encoded from typed fields, so undocumented fields are lost. Prices and sizes stay exact decimals, never floating point.
 - **Manager** (`manager.rs`, `manager_task.rs`): steps the connections and carries out their actions (open and close channels, send live subscribe and unsubscribe, request snapshots, write control and gap records); a failed send is fed back as `SendFailed`. Socket reports come first, then registry changes, then a 100 ms tick that copies `last_message_at` in and ends backoff waits (so a gap can start up to one tick before the last message, never after it). Closed connections are dropped. On shutdown every connection closes, gaps close with `shutdown`, and the sockets get 3 s to finish. Control records are written with a waiting send; only a closed write queue or snapshot channel is fatal.
-- `run` spawns it supervised next to the registry. Until the writer and snapshot worker exist, `run` discards the records and snapshot requests so producers never block.
+- `run` spawns it supervised next to the registry. Until the writer exists, `run` discards the records so producers never block.
 
 Tested against a fake market channel on a local port (`fake_server.rs`), with shrunk timings: events recorded in order (typed, array frames split, unrecognised messages kept, undecodable ones recorded as control records), the subscription message, a server close (gap from the last message, reconnect subscribes every token), refused connections (one gap for the whole outage), shutdown with a gap open, live subscribe and unsubscribe, closing an empty connection, spreading markets over connections, and a full write queue. The channel's heartbeat and idle timeout are marcasite's and are not tested here.
 
@@ -115,9 +115,29 @@ All eight subcommands from section 12.1 exist in clap with their arguments (`--d
 
 | Command | State |
 | --- | --- |
-| `run` | Loads config, spawns the registry and connection manager (supervised: an error cancels the process, makes `RunStop` unclean and exits non-zero), waits for cancellation with a 10 s grace period, then sends `RunStop`. Records and snapshot requests are discarded. No writer, snapshots, status file or recovery |
+| `run` | Loads config, spawns the registry, connection manager and snapshot worker (supervised: an error cancels the process, makes `RunStop` unclean and exits non-zero), waits for cancellation with a 10 s grace period, then sends `RunStop`. Records are discarded. No writer, status file or recovery |
 | `markets` | Works: fetches from Gamma once and prints the selected markets, skipped markets, and counts |
 | `check`, `status`, `snapshot`, `compact`, `verify`, `gaps` | Print a placeholder line and exit 0 |
+
+### 2.8 Snapshot worker (`src/snapshot_worker/`)
+
+Complete against sections 5.7 and 9, except `BooksSeen` (3.1).
+
+- **Rate limiter** (`rate_limiter.rs`): pure. A token bucket of `snapshot_max_requests_per_s` permits refilled at that rate, kept as the time the bucket is next full (GCRA) so it needs no floating point, with `ready_at(now)` for sleeping until the next permit as well as `try_acquire(now)`.
+- **Pending queue** (`pending.rs`): pure. FIFO without duplicates; a token already waiting keeps its place and reason. A batch takes up to `snapshot_batch_size` tokens sharing the front token's reason (the record carries one reason, as in the design), so the front token always goes next and interleaved reasons don't fragment batches.
+- **Schedule** (`schedule.rs`): pure. Newly tracked tokens are spread evenly over the next `snapshot_interval` (sorted, the first a fraction of an interval away, the last a whole one, since each has just had its subscribe snapshot). A token comes due again one interval after its last due time, so the average period stays exact.
+- **Worker** (`worker.rs`): pure decision state. Requests, tracked-token changes (an untracked token leaves the schedule, the queue and the failed list), rounds, rate limiting and retries. One batch at a time: a failed batch is retried after 1, 2 and 4 s (or the server's `Retry-After`, if longer), ahead of new batches. After 4 attempts it becomes a `snapshot_failed` record and its tokens wait for the next round.
+- **Task** (`worker_task.rs`): a round every `snapshot_interval / 60` (1 minute by default) queues due tokens as `scheduled` plus the failed ones, so scheduled snapshots go in batches of about a minute's worth rather than one request per token. Each response is one `Record::Snapshot` with `recv_ts`, the requested tokens, the reason and marcasite's decoded `OrderBookSummary`s (not the raw text, as for websocket frames in 2.6); requested tokens missing from the response are logged. Records are written with a waiting send; only a closed write queue is fatal.
+- **Client** (`books_client.rs`): `BooksClient` trait with `ClobBooksClient`, marcasite's `ClobClient::get_order_books` on `clob_rest_url` (marcasite's own retries are off by default, so attempts are only the worker's).
+
+Differences from the design:
+
+- Scheduled snapshots are gathered in rounds (above) instead of firing per token.
+- "Re-queue for the next scheduled round" is the next round, a minute later by default.
+- Removing a tracked token also drops its queued and failed snapshots.
+- The rate limiter's burst capacity equals the per-second rate (the design does not say).
+
+Tested with paused tokio time against a fake `/books`: every case in section 14.2's "Snapshot queue and rate limiter" table (batching 1,200 tokens as 500, 500, 200; duplicates; 10 batches at 2 per second spread over 4 s; retry then succeed; retries exhausted then re-queued; 3,600 tokens spread one batch a minute over the hour), plus the pure parts on their own.
 
 ## 3. What still needs building
 
@@ -128,8 +148,8 @@ Listed roughly in the order the recording path depends on them.
 1. **Write queue.** Depth and high-water counters for the status file. The queue is already sized from `write_queue_capacity`, and socket tasks already drop and count on overflow.
 2. **Writer.** The only component that writes files: `FileKey` from `recv_ts` in UTC, the `raw/ws`, `raw/snapshots`, `control`, `markets` layout (8.3), run ID in file names, `.jsonl.open` while writing then rename on hourly rotation, `seq` assignment, the envelope (8.1) with the serialised `MarketEvent` in place of `raw` (2.6), flush every second and sync every 5 s, and exit on write failure after recording a gap.
 3. **Frame inspector.** A match on `MarketEvent::Book`, `MarketResolved` and `NewMarket` (no text search needed, since events arrive decoded) after each event is written, feeding `BooksSeen` to the connection manager and notices to the registry.
-4. **Connection manager: `awaiting_book`.** Track tokens subscribed without a full book, request a `missing_book` snapshot after 2 minutes, then mark the token unhealthy. Needs `BooksSeen` from the frame inspector and snapshot worker. Also replace `run`'s placeholder consumers of the write queue and snapshot channel once the writer and snapshot worker exist.
-5. **Snapshot worker.** Deduplicating FIFO, batches of up to 500, `POST /books` through a CLOB client (none exists yet), token-bucket rate limiter, 3 retries then `snapshot_failed` and re-queue, and the hourly schedule spread across the hour.
+4. **Connection manager: `awaiting_book`.** Track tokens subscribed without a full book, request a `missing_book` snapshot after 2 minutes, then mark the token unhealthy. Needs `BooksSeen` from the frame inspector and snapshot worker (which does not send it yet). Also replace `run`'s placeholder consumer of the write queue once the writer exists.
+5. **Snapshot worker: `BooksSeen`.** Tell the connection manager which tokens a snapshot returned a book for, once it tracks `awaiting_book`.
 6. **Status reporter.** Shared atomic counters, the status file every 5 s written by temp-file-and-rename, and `state/tracked_tokens.json`.
 7. **Startup and shutdown.** Create the `RunId`, write `run_start` with version and config hash, rename leftover `.open` files, and write a `process_restart` gap from the previous status file if it lacks a clean stop. On shutdown, close connections, drain the queue, rename files, write `run_stop`, set the clean-stop flag, all within 15 s.
 8. **Periodic summary log line** every 60 s (section 13).
@@ -160,7 +180,7 @@ None of this exists, and no Parquet dependency is in `Cargo.toml` yet. `rust_dec
 
 ### 4.1 What exists
 
-122 tests, all passing (`just archiver test`, under 1 s).
+150 tests, all passing (`just archiver test`, under 1 s).
 
 | Module | Tests | Coverage against section 14 |
 | --- | --- | --- |
@@ -169,8 +189,9 @@ None of this exists, and no Parquet dependency is in `Cargo.toml` yet. `rust_dec
 | Backoff calculator | 4 | First failure, doubling, cap, jitter bounds. The reset and no-reset cases are covered in the connection tests |
 | Token assignment | 7 | Every case in the "Token assignment" table, plus ignoring already placed and unknown tokens |
 | Gap tracker | 4 | Every case in the "Gap tracker" table except "Start time", which is the state machine's (covered there) |
-| Connection manager | 8 | The "Streaming path" group of section 14.4 against a fake websocket server: integration scenarios 2, 4, 11 without the writer, and live subscribe and unsubscribe; plus decoding outcomes and `last_message_at` precision |
+| Connection manager | 9 | The "Streaming path" group of section 14.4 against a fake websocket server: integration scenarios 2, 4, 11 without the writer, and live subscribe and unsubscribe; plus decoding outcomes, `last_message_at` precision and tracked tokens passed to the snapshot worker |
 | Registry | 43 | The "selection rules" and "difference and sanity check" tables, plus market parsing (outcome order, missing fields, wrong token count), details changed, token-ID changes, websocket resolution before tracking, the re-add block, and `registry_task` against a fake Gamma (error keeps the set, rejection writes `registry_rejected`, notice bursts coalesce, expiry while Gamma is down, cancellation, fatal channel loss) |
+| Snapshot worker | 27 | Every case in the "Snapshot queue and rate limiter" table, against a fake `/books` on tokio's paused clock, plus the rate limiter, queue, schedule and retry logic on their own (see 2.8) |
 
 The connection tests use their own harness with tokio's paused clock and a scripted random source, which serves as the design's fake clock for that module. `TokioClock` exists for wall-clock time in other tests but is not used yet.
 
@@ -178,7 +199,7 @@ The connection tests use their own harness with tokio's paused clock and a scrip
 
 **Unit tests for code that already exists:** none missing; see 4.1.
 
-**Unit tests for components not yet built** (section 14.2–14.3): snapshot queue and rate limiter, envelope builder, writer rotation and durability, gap tracker, startup recovery, health evaluation, compactor, book rebuild.
+**Unit tests for components not yet built** (section 14.2–14.3): envelope builder, writer rotation and durability, gap tracker, startup recovery, health evaluation, compactor, book rebuild.
 
 **Test infrastructure** (section 14.1):
 

@@ -242,11 +242,17 @@ mod tests {
             }
         }
 
+        /// The next snapshot request, skipping tracked-token updates.
         async fn snapshot(&mut self) -> SnapshotMsg {
-            time::timeout(TIMEOUT, self.snapshots.recv())
-                .await
-                .expect("timed out waiting for a snapshot request")
-                .expect("snapshot channel closed")
+            loop {
+                let msg = time::timeout(TIMEOUT, self.snapshots.recv())
+                    .await
+                    .expect("timed out waiting for a snapshot request")
+                    .expect("snapshot channel closed");
+                if !matches!(msg, SnapshotMsg::TokensTracked { .. }) {
+                    return msg;
+                }
+            }
         }
 
         /// Adds `markets` as the first tokens, then accepts the connection and checks it
@@ -548,6 +554,29 @@ mod tests {
                     token_count: 2,
                 }
             )
+        );
+        h.stop().await;
+    }
+
+    #[tokio::test]
+    async fn token_changes_are_passed_to_the_snapshot_worker_first() {
+        let mut h = Harness::start().await;
+        h.add(&[1, 2]).await;
+        assert_eq!(
+            h.snapshots.recv().await.unwrap(),
+            SnapshotMsg::TokensTracked {
+                add: tokens_of(&[1, 2]),
+                remove: HashSet::new(),
+            }
+        );
+
+        h.remove(&[1]).await;
+        assert_eq!(
+            h.snapshots.recv().await.unwrap(),
+            SnapshotMsg::TokensTracked {
+                add: HashSet::new(),
+                remove: tokens_of(&[1]),
+            }
         );
         h.stop().await;
     }

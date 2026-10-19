@@ -25,7 +25,7 @@ use crate::{
             SocketEvent,
         },
     },
-    market_registry::token_changes::TokenChanges,
+    market_registry::token_changes::{MarketTokens, TokenChanges},
     messages::{ControlBody, GapReason, Record, SnapshotMsg},
     types::RandomSource,
 };
@@ -91,6 +91,17 @@ impl<R: RandomSource> ConnectionManager<R> {
     ///
     /// If the write queue or snapshot worker has gone away.
     pub async fn apply_token_changes(&mut self, changes: TokenChanges) -> Result<()> {
+        // First, so the snapshot worker schedules the tokens before their subscribe snapshots
+        // are requested.
+        let both = |m: &MarketTokens| [m.yes.clone(), m.no.clone()];
+        let tracked = SnapshotMsg::TokensTracked {
+            add: changes.added.values().flat_map(both).collect(),
+            remove: changes.removed.values().flat_map(both).collect(),
+        };
+        if self.snapshots.send(tracked).is_err() {
+            anyhow::bail!("snapshot worker gone, connection manager exiting");
+        }
+
         let mut removed: Vec<_> = changes.removed.into_iter().collect();
         removed.sort_by(|a, b| a.0.cmp(&b.0));
         let unassigned = self.assignment.unassign(removed.iter().map(|(_, m)| m));

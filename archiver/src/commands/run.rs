@@ -12,6 +12,7 @@ use crate::{
     connection_manager::manager_task::connection_manager_task,
     market_registry::registry_task::registry_task,
     messages::{ConnectionManagerMsg, ControlBody, Record, RegistryMsg, SnapshotMsg},
+    snapshot_worker::{books_client::ClobBooksClient, worker_task::snapshot_worker_task},
 };
 
 pub async fn execute(_args: CommonArgs, token: CancellationToken) -> anyhow::Result<()> {
@@ -19,26 +20,22 @@ pub async fn execute(_args: CommonArgs, token: CancellationToken) -> anyhow::Res
 
     let config = Arc::new(Config::load(&_args.config)?);
     let client = Arc::new(MarcasiteClient::connect(&config).await?);
+    let books_client = Arc::new(ClobBooksClient::new(&config)?);
     let clock = Arc::new(SystemClock);
 
     let tracker = TaskTracker::new();
     let registry_token = token.child_token();
     let conn_mgr_token = token.child_token();
+    let snapshot_token = token.child_token();
 
     let (registry_tx, registry_rx) = mpsc::unbounded_channel::<RegistryMsg>();
     let (conn_mgr_tx, conn_mgr_rx) = mpsc::channel::<ConnectionManagerMsg>(256);
     let (write_tx, mut write_rx) = mpsc::channel::<Record>(config.write_queue_capacity);
-    let (snapshot_tx, mut snapshot_rx) = mpsc::unbounded_channel::<SnapshotMsg>();
+    let (snapshot_tx, snapshot_rx) = mpsc::unbounded_channel::<SnapshotMsg>();
 
     // TODO: replace with the writer. Until then records are discarded, so producers never
     // block or overflow the queue.
     tokio::spawn(async move { while write_rx.recv().await.is_some() {} });
-    // TODO: replace with the snapshot worker.
-    tokio::spawn(async move {
-        while let Some(msg) = snapshot_rx.recv().await {
-            tracing::debug!(?msg, "no snapshot worker, request dropped");
-        }
-    });
 
     let registry = tracker.spawn(supervise(
         "registry",
@@ -49,6 +46,19 @@ pub async fn execute(_args: CommonArgs, token: CancellationToken) -> anyhow::Res
             write_tx.clone(),
             registry_token,
             client,
+            config.clone(),
+            clock.clone(),
+        ),
+    ));
+
+    let snapshots = tracker.spawn(supervise(
+        "snapshot worker",
+        token.clone(),
+        snapshot_worker_task(
+            snapshot_rx,
+            write_tx.clone(),
+            snapshot_token,
+            books_client,
             config.clone(),
             clock.clone(),
         ),
@@ -84,7 +94,7 @@ pub async fn execute(_args: CommonArgs, token: CancellationToken) -> anyhow::Res
     }
 
     // A task that is unfinished, panicked or returned an error makes the stop unclean.
-    let failed = [registry, conn_mgr]
+    let failed = [registry, conn_mgr, snapshots]
         .into_iter()
         .any(|task| !matches!(task.now_or_never(), Some(Ok(true))));
     let clean = clean && !failed;
