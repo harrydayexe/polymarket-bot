@@ -4,11 +4,11 @@ type: project
 ---
 # Implementation Status
 
-A comparison of the archiver as it stands (commit `0507a62`) against `docs/design.md`. This is an overview of what exists and what is missing, not a code review. Section numbers refer to the design document.
+A comparison of the archiver as it stands (after the connection manager's websocket handling) against `docs/design.md`. This is an overview of what exists and what is missing, not a code review. Section numbers refer to the design document.
 
 ## 1. Summary
 
-The project is in its foundation stage. The pure decision logic for a single websocket connection is complete and thoroughly tested, configuration loading and the market registry are complete. Nothing yet touches a websocket, writes to disk, or takes a snapshot, so `archiver run` does not record any data.
+The project is in its foundation stage. Configuration loading, the market registry and the connection manager's websocket handling are complete: `archiver run` tracks markets, keeps websocket connections open for their tokens and turns every frame into a record. Nothing yet writes to disk or takes a snapshot, so the records are discarded and `archiver run` does not record any data.
 
 | Area | Status |
 | --- | --- |
@@ -19,8 +19,8 @@ The project is in its foundation stage. The pure decision logic for a single web
 | Market registry (5.4, 6) | Done |
 | Records, messages, control bodies (5.6) | Partial |
 | CLI skeleton (12.1) | Partial: all subcommands parse, only `markets` does real work |
-| Connection manager: token assignment, sockets, gap tracker | Not started |
-| Write queue (bounded, non-blocking) | Not started (placeholder channel only) |
+| Connection manager: token assignment, sockets, gap tracker (5.5, 7) | Done (no `awaiting_book` tracking) |
+| Write queue (bounded, non-blocking) | Partial: bounded channel sized from config, frames put without waiting; no depth or high-water counters |
 | Writer, file layout, rotation, durability (8) | Not started |
 | Frame inspector | Not started |
 | Snapshot worker and rate limiter (9) | Not started |
@@ -58,9 +58,9 @@ Deliberate deviations, all reasonable for Rust:
 - Socket events are tagged with their `ConnAttemptId`, so late events from an abandoned socket are dropped instead of affecting the current attempt.
 - An explicit `SubscribeSent` event moves Subscribing to Streaming, with its own timeout, and token changes that arrive mid-subscribe are reconciled when it completes.
 - `Tick` carries the socket reader's `last_message_at` instead of a separate shared atomic read.
-- `SendSubscribe` has no `custom_features` flag; the code that sends the message will need to set `custom_feature_enabled: true` itself.
+- `SendSubscribe` has no `custom_features` flag; the manager always sets `custom_feature_enabled: true`, and sends the initial subscription message when the connection is Subscribing and a live `subscribe` operation otherwise.
 
-What is **not** there is everything around it: nothing creates `Connection`s, carries out their actions, or opens a socket. `manager.rs` and `manager_task.rs` are empty files.
+The connection manager (2.6) drives these state machines.
 
 ### 2.3 Backoff, clock and IDs
 
@@ -91,15 +91,27 @@ Differences from the design:
 
 ### 2.5 Records and messages (`src/messages.rs`)
 
-`ControlBody`, `GapReason` and `SnapshotReason` cover every case in section 5.6. `Record` has only `Market` and `Control`; `WsFrame` and `Snapshot` records do not exist yet, and records carry no `run_id` (the writer could add it). `GapClose` has an `attempts` field where the design has `reason`. `Record::Market` matches the design (`market` plus `Added`/`Updated`). `ConnectionManagerMsg` has only `TokenChanges`, keyed by condition ID with both tokens (no `ForConnection`, `BooksSeen` or `Tick`), and there is no `SnapshotMsg`. Shutdown goes through a `CancellationToken` rather than a `Shutdown` message, which is the idiomatic tokio choice.
+`ControlBody`, `GapReason` and `SnapshotReason` cover every case in section 5.6. `Record` has `WsFrame`, `Market` and `Control`; the `Snapshot` record does not exist yet, and records carry no `run_id` (the writer could add it). `Record::Market` matches the design (`market` plus `Added`/`Updated`). `ConnectionManagerMsg` has only `TokenChanges`, keyed by condition ID with both tokens: socket events go to the manager on its own internal channel and ticks come from its own timer, so there is no `ForConnection` or `Tick`, and no `BooksSeen` yet. `SnapshotMsg` has only `SnapshotRequest`. Shutdown goes through a `CancellationToken` rather than a `Shutdown` message, which is the idiomatic tokio choice.
 
-### 2.6 Command-line interface (`src/cli.rs`, `src/commands/`)
+### 2.6 Connection manager (`src/connection_manager/`)
+
+Complete against sections 5.5, 5.7 (gap tracker) and 7, except `awaiting_book` (3.1).
+
+- **Token assignment** (`assignment.rs`): pure. New markets go to the least-loaded slot with room for both tokens (lowest slot ID on a tie), or to a new slot. Tokens never move. A slot whose last token is removed is forgotten and its ID (`c-0001`, `c-0002`, …) never reused. `TokenChanges` are applied removals first, in condition-ID order.
+- **Gap tracker** (`gap_tracker.rs`): pure. Double opens keep the earlier start, closes without an open gap write nothing (silently, not with a warning as section 14.3 says, because connections close gaps on every resume and unsubscribe whether or not one was open), and shutdown closes anything left open. `GapClose` carries a `reason`.
+- **Socket task** (`socket.rs`), one per connection attempt, on marcasite's raw websocket driver (`marcasite_core::ws::WsConnection`). `marcasite::ws::MarketChannel` is not used because it decodes frames into typed events and hides `PONG`, while the archive must keep each frame's exact text and the state machine owns the heartbeat. The task stamps each frame with its receive time (to the microsecond), publishes it as `last_message_at` (an atomic), and `try_send`s a `WsFrame` record; `PONG` is reported, not recorded. When the queue is full it drops the frame, reports `QueueOverflow` once, and reports the number dropped when the socket ends, which the manager writes as a `queue_overflow` control record. Closing cancels the task, which closes the socket and still records frames received until the close completes.
+- **Manager** (`manager.rs`, `manager_task.rs`): steps the connections and carries out their actions (open and close sockets, send subscribe, unsubscribe and `PING`, request snapshots, write control and gap records); a failed send is fed back as `SendFailed`. Socket reports come first, then registry changes, then a 100 ms tick that copies `last_message_at` in and runs every timer (so a gap can start up to one tick before the last frame, never after it). Closed connections are dropped. On shutdown every connection closes, gaps close with `shutdown`, and the sockets get 3 s to finish. Control records are written with a waiting send; only a closed write queue or snapshot channel is fatal.
+- `run` spawns it supervised next to the registry. Until the writer and snapshot worker exist, `run` discards the records and snapshot requests so producers never block.
+
+Tested against a fake market channel on a local port (`fake_server.rs`), with shrunk timings: frames recorded exactly and in order, the subscription message, a server close (gap from the last frame, reconnect subscribes every token), unanswered pings, refused connections (one gap for the whole outage), shutdown with a gap open, live subscribe and unsubscribe, closing an empty connection, spreading markets over connections, and a full write queue. Also checked by hand against the live market channel: 78 tokens on one connection, frames received, the heartbeat holding past the 30 s timeout, and a clean shutdown.
+
+### 2.7 Command-line interface (`src/cli.rs`, `src/commands/`)
 
 All eight subcommands from section 12.1 exist in clap with their arguments (`--date`/`--since`, `--tokens`, `--all`), and a SIGINT/SIGTERM handler cancels a shared token.
 
 | Command | State |
 | --- | --- |
-| `run` | Loads config, spawns the registry task only (supervised: an error cancels the process, makes `RunStop` unclean and exits non-zero), waits for cancellation with a 10 s grace period, then tries to send `RunStop` to a write queue nothing reads. No connections, writer, snapshots, status file or recovery |
+| `run` | Loads config, spawns the registry and connection manager (supervised: an error cancels the process, makes `RunStop` unclean and exits non-zero), waits for cancellation with a 10 s grace period, then sends `RunStop`. Records and snapshot requests are discarded. No writer, snapshots, status file or recovery |
 | `markets` | Works: fetches from Gamma once and prints the selected markets, skipped markets, and counts |
 | `check`, `status`, `snapshot`, `compact`, `verify`, `gaps` | Print a placeholder line and exit 0 |
 
@@ -109,16 +121,10 @@ Listed roughly in the order the recording path depends on them.
 
 ### 3.1 Recording path (`archiver run`)
 
-1. **Write queue.** Replace the placeholder `mpsc::channel(10_000)` with a bounded queue sized from `write_queue_capacity`, a non-blocking `try_put` that drops and counts on overflow, and depth and high-water counters.
+1. **Write queue.** Depth and high-water counters for the status file. The queue is already sized from `write_queue_capacity`, and socket tasks already drop and count on overflow.
 2. **Writer.** The only component that writes files: `FileKey` from `recv_ts` in UTC, the `raw/ws`, `raw/snapshots`, `control`, `markets` layout (8.3), run ID in file names, `.jsonl.open` while writing then rename on hourly rotation, `seq` assignment, the envelope (8.1), flush every second and sync every 5 s, and exit on write failure after recording a gap.
 3. **Frame inspector.** Cheap text match for `book`, `market_resolved` and `new_market` after each frame is written, feeding `BooksSeen` to the connection manager and notices to the registry.
-4. **Connection manager.**
-   - Token assignment: least-loaded connection first, both tokens of a market on the same connection, no rebalancing, new slot when all are full, drop empty slots.
-   - The executor that carries out `ConnectionAction`s: open the socket (via marcasite's `ws` feature, already enabled in `Cargo.toml`), send subscribe/unsubscribe with `custom_feature_enabled`, send `PING`, close.
-   - One socket reader task per connection that stamps receive time, pushes `WsFrame` records, reports `PONG` and close events, and publishes `last_message_at`.
-   - A ~100 ms tick loop feeding `Tick` into every connection.
-   - `GapTracker` to make double opens and unmatched closes harmless and to turn gap actions into control records.
-   - `awaiting_book` tracking: request a `missing_book` snapshot after 2 minutes, then mark the token unhealthy.
+4. **Connection manager: `awaiting_book`.** Track tokens subscribed without a full book, request a `missing_book` snapshot after 2 minutes, then mark the token unhealthy. Needs `BooksSeen` from the frame inspector and snapshot worker. Also replace `run`'s placeholder consumers of the write queue and snapshot channel once the writer and snapshot worker exist.
 5. **Snapshot worker.** Deduplicating FIFO, batches of up to 500, `POST /books` through a CLOB client (none exists yet), token-bucket rate limiter, 3 retries then `snapshot_failed` and re-queue, and the hourly schedule spread across the hour.
 6. **Status reporter.** Shared atomic counters, the status file every 5 s written by temp-file-and-rename, and `state/tracked_tokens.json`.
 7. **Startup and shutdown.** Create the `RunId`, write `run_start` with version and config hash, rename leftover `.open` files, and write a `process_restart` gap from the previous status file if it lacks a clean stop. On shutdown, close connections, drain the queue, rename files, write `run_stop`, set the clean-stop flag, all within 15 s.
@@ -150,13 +156,16 @@ None of this exists, and no Parquet dependency is in `Cargo.toml` yet. `rust_dec
 
 ### 4.1 What exists
 
-113 unit tests, all passing (`just archiver test`, about 0.4 s).
+135 tests, all passing (`just archiver test`, about 1 s).
 
 | Module | Tests | Coverage against section 14 |
 | --- | --- | --- |
 | Connection state machine | 49 | Every case in the "Connection state machine" and "Heartbeat and liveness" tables, plus stale-event handling, shutdown from each state, and a randomised test checking the gap contract over many event sequences, as section 10 asks for |
-| Configuration | 17 | Every case in the "Configuration" table except command-line override, which is not implemented. Also checks the shipped `config.toml` is valid |
+| Configuration | 18 | Every case in the "Configuration" table except command-line override, which is not implemented. Also checks the shipped `config.toml` is valid |
 | Backoff calculator | 4 | First failure, doubling, cap, jitter bounds. The reset and no-reset cases are covered in the connection tests |
+| Token assignment | 7 | Every case in the "Token assignment" table, plus ignoring already placed and unknown tokens |
+| Gap tracker | 4 | Every case in the "Gap tracker" table except "Start time", which is the state machine's (covered there) |
+| Connection manager | 10 | The "Streaming path" group of section 14.4 against a fake websocket server: integration scenarios 2–4, 11 without the writer, and live subscribe and unsubscribe; plus the subscription message format and `last_message_at` precision |
 | Registry | 43 | The "selection rules" and "difference and sanity check" tables, plus market parsing (outcome order, missing fields, wrong token count), details changed, token-ID changes, websocket resolution before tracking, the re-add block, and `registry_task` against a fake Gamma (error keeps the set, rejection writes `registry_rejected`, notice bursts coalesce, expiry while Gamma is down, cancellation, fatal channel loss) |
 
 The connection tests use their own harness with tokio's paused clock and a scripted random source, which serves as the design's fake clock for that module. `TokioClock` exists for wall-clock time in other tests but is not used yet.
@@ -165,19 +174,19 @@ The connection tests use their own harness with tokio's paused clock and a scrip
 
 **Unit tests for code that already exists:** none missing; see 4.1.
 
-**Unit tests for components not yet built** (section 14.2–14.3): token assignment, snapshot queue and rate limiter, envelope builder, writer rotation and durability, gap tracker, startup recovery, health evaluation, compactor, book rebuild.
+**Unit tests for components not yet built** (section 14.2–14.3): snapshot queue and rate limiter, envelope builder, writer rotation and durability, gap tracker, startup recovery, health evaluation, compactor, book rebuild.
 
 **Test infrastructure** (section 14.1):
 
 | Tool | State |
 | --- | --- |
 | Fake clock | Partly there: tokio paused time plus `TokioClock` |
-| Fake Polymarket server (websocket, `/books`, Gamma) | Not started |
+| Fake Polymarket server (websocket, `/books`, Gamma) | Websocket only (`connection_manager/fake_server.rs`): scripted connections, `PONG` replies that can be switched off, refused handshakes |
 | Recorded fixtures from real Polymarket | None |
 | Temporary archive folder helper | Not started |
 | Archive reader helper | Not started |
 
-**Higher layers:** there is no `tests/` directory, so none of the 16 integration scenarios (14.4), the end-to-end daily cycle (14.5), the CLI exit-code tests (14.5) or the soak test (14.6) exist. These depend on the writer, connection manager and fake server.
+**Higher layers:** there is no `tests/` directory. The connection manager's tests cover part of the streaming path, but none of the 16 integration scenarios (14.4) runs against the archive on disk, the end-to-end daily cycle (14.5), the CLI exit-code tests (14.5) or the soak test (14.6) exist. These depend on the writer, connection manager and fake server.
 
 ## 5. Design document drift
 
@@ -185,6 +194,8 @@ Places where `design.md` no longer matches the code and could be updated:
 
 - Config key names and the two extra settings (2.1).
 - No `Closing` connection state; socket events carry attempt IDs; `SubscribeSent` event (2.2).
+- `GapClose` carries a reason; a close without an open gap is silent, not a warning (2.6).
+- `tokens_per_connection` must be at least 2, so a market fits on one connection.
 - The `Clock` interface is wall-clock only, with monotonic time from tokio (2.3).
 - Shutdown via cancellation token rather than `Shutdown` messages (2.5).
 - `TokenId` and `ConditionId` come from marcasite, and Gamma access goes through marcasite rather than raw REST.

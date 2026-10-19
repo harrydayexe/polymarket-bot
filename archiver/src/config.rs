@@ -191,6 +191,11 @@ impl Config {
             format_duration(self.backoff_max)
         );
         ensure!(
+            self.tokens_per_connection >= 2,
+            "tokens_per_connection ({}) must be at least 2, so both tokens of a market fit on one connection",
+            self.tokens_per_connection
+        );
+        ensure!(
             self.snapshot_batch_size <= 500,
             "snapshot_batch_size ({}) must not exceed 500, the maximum the endpoint accepts",
             self.snapshot_batch_size
@@ -322,6 +327,15 @@ mod tests {
         let msg = validation_err("backoff_initial = \"2m\"");
         assert!(
             msg.contains("backoff_initial (2m) must not exceed"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn connection_too_small_for_a_market_is_refused() {
+        let msg = validation_err("tokens_per_connection = 1");
+        assert!(
+            msg.contains("tokens_per_connection (1) must be at least 2"),
             "{msg}"
         );
     }

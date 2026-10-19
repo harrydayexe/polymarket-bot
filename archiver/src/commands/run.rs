@@ -9,8 +9,9 @@ use crate::{
     client::MarcasiteClient,
     clock::{Clock, SystemClock},
     config::Config,
+    connection_manager::manager_task::connection_manager_task,
     market_registry::registry_task::registry_task,
-    messages::{ConnectionManagerMsg, ControlBody, Record, RegistryMsg},
+    messages::{ConnectionManagerMsg, ControlBody, Record, RegistryMsg, SnapshotMsg},
 };
 
 pub async fn execute(_args: CommonArgs, token: CancellationToken) -> anyhow::Result<()> {
@@ -22,10 +23,22 @@ pub async fn execute(_args: CommonArgs, token: CancellationToken) -> anyhow::Res
 
     let tracker = TaskTracker::new();
     let registry_token = token.child_token();
+    let conn_mgr_token = token.child_token();
 
     let (registry_tx, registry_rx) = mpsc::unbounded_channel::<RegistryMsg>();
     let (conn_mgr_tx, conn_mgr_rx) = mpsc::channel::<ConnectionManagerMsg>(256);
-    let (write_tx, write_rx) = mpsc::channel::<Record>(10_000);
+    let (write_tx, mut write_rx) = mpsc::channel::<Record>(config.write_queue_capacity);
+    let (snapshot_tx, mut snapshot_rx) = mpsc::unbounded_channel::<SnapshotMsg>();
+
+    // TODO: replace with the writer. Until then records are discarded, so producers never
+    // block or overflow the queue.
+    tokio::spawn(async move { while write_rx.recv().await.is_some() {} });
+    // TODO: replace with the snapshot worker.
+    tokio::spawn(async move {
+        while let Some(msg) = snapshot_rx.recv().await {
+            tracing::debug!(?msg, "no snapshot worker, request dropped");
+        }
+    });
 
     let registry = tracker.spawn(supervise(
         "registry",
@@ -36,6 +49,19 @@ pub async fn execute(_args: CommonArgs, token: CancellationToken) -> anyhow::Res
             write_tx.clone(),
             registry_token,
             client,
+            config.clone(),
+            clock.clone(),
+        ),
+    ));
+
+    let conn_mgr = tracker.spawn(supervise(
+        "connection manager",
+        token.clone(),
+        connection_manager_task(
+            conn_mgr_rx,
+            write_tx.clone(),
+            snapshot_tx,
+            conn_mgr_token,
             config,
             clock.clone(),
         ),
@@ -58,7 +84,9 @@ pub async fn execute(_args: CommonArgs, token: CancellationToken) -> anyhow::Res
     }
 
     // A task that is unfinished, panicked or returned an error makes the stop unclean.
-    let failed = !matches!(registry.now_or_never(), Some(Ok(true)));
+    let failed = [registry, conn_mgr]
+        .into_iter()
+        .any(|task| !matches!(task.now_or_never(), Some(Ok(true))));
     let clean = clean && !failed;
 
     // TODO: add the control message

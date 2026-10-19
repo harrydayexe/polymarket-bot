@@ -27,8 +27,24 @@ pub enum ConnectionManagerMsg {
     TokenChanges(TokenChanges),
 }
 
+/// Messages to the snapshot worker.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SnapshotMsg {
+    /// Take a REST snapshot of `tokens`.
+    SnapshotRequest {
+        tokens: HashSet<TokenId>,
+        reason: SnapshotReason,
+    },
+}
+
 #[derive(Debug)]
 pub enum Record {
+    /// One websocket text frame, exactly as received.
+    WsFrame {
+        recv_ts: DateTime<Utc>,
+        conn_id: ConnAttemptId,
+        raw: String,
+    },
     Market {
         recv_ts: DateTime<Utc>,
         market: MarketInfo,
@@ -75,7 +91,7 @@ pub enum ControlBody {
     GapClose {
         tokens: HashSet<TokenId>,
         end: DateTime<Utc>,
-        attempts: u32,
+        reason: GapReason,
     },
     SnapshotFailed {
         tokens: HashSet<TokenId>,
