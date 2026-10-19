@@ -11,19 +11,21 @@ chrono = { version = "0.4.45", default-features = false, features = [
     "std",
 ] }
 clap = { version = "4.6.7", features = ["derive"] }
-clap-verbosity-flag = { version = "3.0.4", default-features = false, features = ["tracing"] }
+clap-verbosity-flag = { version = "3.0.4", default-features = false, features = [
+    "tracing",
+] }
 env_logger = "0.11.11"
 futures = "0.3.34"
 futures-util = "0.3.34"
 humantime = "2.4.0"
 humantime-serde = "1.1.1"
-marcasite = { version = "0.1.0", default-features = false, features = [
+marcasite = { version = "0.1.3", default-features = false, features = [
     "clob",
     "data",
     "gamma",
     "ws",
 ] }
-marcasite-core = "0.1.1"
+marcasite-core = "0.1.3"
 miette = { version = "7.6.0", features = ["fancy"] }
 rand = "0.10.3"
 reqwest = { version = "0.13.5", features = ["json", "query"] }
