@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "marcasite": {
+      "type": "stdio",
+      "command": "marcasite-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}
