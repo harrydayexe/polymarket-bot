@@ -8,7 +8,7 @@ A comparison of the archiver as it stands (after the connection manager's websoc
 
 ## 1. Summary
 
-The project is in its foundation stage. Configuration loading, the market registry and the connection manager's websocket handling are complete: `archiver run` tracks markets, keeps websocket connections open for their tokens and turns every frame into a record. Nothing yet writes to disk or takes a snapshot, so the records are discarded and `archiver run` does not record any data.
+The project is in its foundation stage. Configuration loading, the market registry and the connection manager's websocket handling are complete: `archiver run` tracks markets, keeps websocket connections open for their tokens and turns every message into a record. Nothing yet writes to disk or takes a snapshot, so the records are discarded and `archiver run` does not record any data.
 
 | Area | Status |
 | --- | --- |
@@ -50,15 +50,18 @@ Differences from the design:
 
 ### 2.2 Connection state machine (`src/connection_manager/connection.rs`, `types.rs`)
 
-The decision logic from sections 5.5 and 7 is implemented as a pure `step(connection, event, now, config, rng) -> actions` function. It covers every state and transition in the design: connecting with timeout, subscribing, streaming with ping schedule and pong deadline, backoff with jitter and reset after stable streaming, live subscribe and unsubscribe, token changes in every state, closing when the last token is removed, and shutdown from any state. It emits `OpenGaps` / `CloseGaps` / `Emit` actions that follow the gap contract in section 10.
+The decision logic from sections 5.5 and 7 is implemented as a pure `step(connection, event, now, config, rng) -> actions` function, shaped around marcasite's market channel (2.6), which owns the socket-level work. States are Connecting, Streaming, Backoff and Closed. It covers backoff with jitter and reset after stable streaming, live subscribe and unsubscribe, token changes in every state, closing when the last token is removed, and shutdown from any state. It emits `OpenGaps` / `CloseGaps` / `Emit` actions that follow the gap contract in section 10.
 
-Deliberate deviations, all reasonable for Rust:
+Deviations from the design:
 
+- No `Subscribing` state. `OpenSocket` carries the tokens, and the channel sends the subscription as part of connecting, so `Opened` goes straight to Streaming. Token changes that arrive while connecting are reconciled with a live subscribe or unsubscribe once open.
+- No heartbeat logic (no `SendPing`, `PongReceived` or pong deadline). The channel sends `PING` every `heartbeat_interval` and ends the stream when nothing arrives within `heartbeat_timeout`; that arrives as `TimedOut` and opens a `heartbeat_timeout` gap.
+- No connect timeout. The channel bounds the handshake and subscription send with `connect_timeout` and reports a failure.
+- A refused handshake's `Retry-After` (`Failed { retry_after }`) lengthens the backoff to at least that long.
 - No separate `Closing` state; closing is a single step straight to `Closed` (documented in `types.rs`).
 - Socket events are tagged with their `ConnAttemptId`, so late events from an abandoned socket are dropped instead of affecting the current attempt.
-- An explicit `SubscribeSent` event moves Subscribing to Streaming, with its own timeout, and token changes that arrive mid-subscribe are reconciled when it completes.
 - `Tick` carries the socket reader's `last_message_at` instead of a separate shared atomic read.
-- `SendSubscribe` has no `custom_features` flag; the manager always sets `custom_feature_enabled: true`, and sends the initial subscription message when the connection is Subscribing and a live `subscribe` operation otherwise.
+- `SendSubscribe` has no `custom_features` flag; the manager always sets `custom_feature_enabled: true`.
 
 The connection manager (2.6) drives these state machines.
 
@@ -91,7 +94,7 @@ Differences from the design:
 
 ### 2.5 Records and messages (`src/messages.rs`)
 
-`ControlBody`, `GapReason` and `SnapshotReason` cover every case in section 5.6. `Record` has `WsFrame`, `Market` and `Control`; the `Snapshot` record does not exist yet, and records carry no `run_id` (the writer could add it). `Record::Market` matches the design (`market` plus `Added`/`Updated`). `ConnectionManagerMsg` has only `TokenChanges`, keyed by condition ID with both tokens: socket events go to the manager on its own internal channel and ticks come from its own timer, so there is no `ForConnection` or `Tick`, and no `BooksSeen` yet. `SnapshotMsg` has only `SnapshotRequest`. Shutdown goes through a `CancellationToken` rather than a `Shutdown` message, which is the idiomatic tokio choice.
+`ControlBody`, `GapReason` and `SnapshotReason` cover every case in section 5.6. `Record` has `WsFrame`, `Market` and `Control`. `WsFrame` holds marcasite's decoded `MarketEvent`, not the raw text (2.6). `ControlBody` has an extra `FrameDecodeFailed`; the `Snapshot` record does not exist yet, and records carry no `run_id` (the writer could add it). `Record::Market` matches the design (`market` plus `Added`/`Updated`). `ConnectionManagerMsg` has only `TokenChanges`, keyed by condition ID with both tokens: socket events go to the manager on its own internal channel and ticks come from its own timer, so there is no `ForConnection` or `Tick`, and no `BooksSeen` yet. `SnapshotMsg` has only `SnapshotRequest`. Shutdown goes through a `CancellationToken` rather than a `Shutdown` message, which is the idiomatic tokio choice.
 
 ### 2.6 Connection manager (`src/connection_manager/`)
 
@@ -99,11 +102,12 @@ Complete against sections 5.5, 5.7 (gap tracker) and 7, except `awaiting_book` (
 
 - **Token assignment** (`assignment.rs`): pure. New markets go to the least-loaded slot with room for both tokens (lowest slot ID on a tie), or to a new slot. Tokens never move. A slot whose last token is removed is forgotten and its ID (`c-0001`, `c-0002`, …) never reused. `TokenChanges` are applied removals first, in condition-ID order.
 - **Gap tracker** (`gap_tracker.rs`): pure. Double opens keep the earlier start, closes without an open gap write nothing (silently, not with a warning as section 14.3 says, because connections close gaps on every resume and unsubscribe whether or not one was open), and shutdown closes anything left open. `GapClose` carries a `reason`.
-- **Socket task** (`socket.rs`), one per connection attempt, on marcasite's raw websocket driver (`marcasite_core::ws::WsConnection`). `marcasite::ws::MarketChannel` is not used because it decodes frames into typed events and hides `PONG`, while the archive must keep each frame's exact text and the state machine owns the heartbeat. The task stamps each frame with its receive time (to the microsecond), publishes it as `last_message_at` (an atomic), and `try_send`s a `WsFrame` record; `PONG` is reported, not recorded. When the queue is full it drops the frame, reports `QueueOverflow` once, and reports the number dropped when the socket ends, which the manager writes as a `queue_overflow` control record. Closing cancels the task, which closes the socket and still records frames received until the close completes.
-- **Manager** (`manager.rs`, `manager_task.rs`): steps the connections and carries out their actions (open and close sockets, send subscribe, unsubscribe and `PING`, request snapshots, write control and gap records); a failed send is fed back as `SendFailed`. Socket reports come first, then registry changes, then a 100 ms tick that copies `last_message_at` in and runs every timer (so a gap can start up to one tick before the last frame, never after it). Closed connections are dropped. On shutdown every connection closes, gaps close with `shutdown`, and the sockets get 3 s to finish. Control records are written with a waiting send; only a closed write queue or snapshot channel is fatal.
+- **Socket task** (`socket.rs`), one per connection attempt, on `marcasite::ws::MarketChannel`. The manager configures the channel's URL, `connect_timeout`, heartbeat (`heartbeat_interval`) and idle timeout (`heartbeat_timeout`), and the task connects with a `MarketSubscription` for the attempt's tokens with `custom_feature_enabled`. It hands the channel's handle to the manager, which sends live subscribe and unsubscribe through it. Each event is stamped with its receive time (to the microsecond), published as `last_message_at` (an atomic), and `try_send` as a `WsFrame` record. A message that fails marcasite's schema decode cannot be archived, so it becomes a `frame_decode_failed` control record quoting marcasite's error (the first 256 bytes of the message). A timeout error becomes `TimedOut`; any other final error, or a normal close, becomes `Closed`. When the queue is full the task drops the record, reports `QueueOverflow` once, and reports the number dropped when the channel ends, which the manager writes as a `queue_overflow` control record. Closing cancels the task, which closes the channel and still records events received until the close completes.
+- **What the archive holds instead of raw text.** The design stores each frame's exact text (`raw`). The channel only yields decoded events, so the writer will serialise `MarketEvent` (marcasite's `Serialize`). That is not byte-identical to the wire: a frame holding an array becomes one record per element, unrecognised messages are kept as their JSON value (`MarketEvent::Unknown`), and recognised ones are re-encoded from typed fields, so undocumented fields are lost. Prices and sizes stay exact decimals, never floating point.
+- **Manager** (`manager.rs`, `manager_task.rs`): steps the connections and carries out their actions (open and close channels, send live subscribe and unsubscribe, request snapshots, write control and gap records); a failed send is fed back as `SendFailed`. Socket reports come first, then registry changes, then a 100 ms tick that copies `last_message_at` in and ends backoff waits (so a gap can start up to one tick before the last message, never after it). Closed connections are dropped. On shutdown every connection closes, gaps close with `shutdown`, and the sockets get 3 s to finish. Control records are written with a waiting send; only a closed write queue or snapshot channel is fatal.
 - `run` spawns it supervised next to the registry. Until the writer and snapshot worker exist, `run` discards the records and snapshot requests so producers never block.
 
-Tested against a fake market channel on a local port (`fake_server.rs`), with shrunk timings: frames recorded exactly and in order, the subscription message, a server close (gap from the last frame, reconnect subscribes every token), unanswered pings, refused connections (one gap for the whole outage), shutdown with a gap open, live subscribe and unsubscribe, closing an empty connection, spreading markets over connections, and a full write queue. Also checked by hand against the live market channel: 78 tokens on one connection, frames received, the heartbeat holding past the 30 s timeout, and a clean shutdown.
+Tested against a fake market channel on a local port (`fake_server.rs`), with shrunk timings: events recorded in order (typed, array frames split, unrecognised messages kept, undecodable ones recorded as control records), the subscription message, a server close (gap from the last message, reconnect subscribes every token), refused connections (one gap for the whole outage), shutdown with a gap open, live subscribe and unsubscribe, closing an empty connection, spreading markets over connections, and a full write queue. The channel's heartbeat and idle timeout are marcasite's and are not tested here.
 
 ### 2.7 Command-line interface (`src/cli.rs`, `src/commands/`)
 
@@ -122,8 +126,8 @@ Listed roughly in the order the recording path depends on them.
 ### 3.1 Recording path (`archiver run`)
 
 1. **Write queue.** Depth and high-water counters for the status file. The queue is already sized from `write_queue_capacity`, and socket tasks already drop and count on overflow.
-2. **Writer.** The only component that writes files: `FileKey` from `recv_ts` in UTC, the `raw/ws`, `raw/snapshots`, `control`, `markets` layout (8.3), run ID in file names, `.jsonl.open` while writing then rename on hourly rotation, `seq` assignment, the envelope (8.1), flush every second and sync every 5 s, and exit on write failure after recording a gap.
-3. **Frame inspector.** Cheap text match for `book`, `market_resolved` and `new_market` after each frame is written, feeding `BooksSeen` to the connection manager and notices to the registry.
+2. **Writer.** The only component that writes files: `FileKey` from `recv_ts` in UTC, the `raw/ws`, `raw/snapshots`, `control`, `markets` layout (8.3), run ID in file names, `.jsonl.open` while writing then rename on hourly rotation, `seq` assignment, the envelope (8.1) with the serialised `MarketEvent` in place of `raw` (2.6), flush every second and sync every 5 s, and exit on write failure after recording a gap.
+3. **Frame inspector.** A match on `MarketEvent::Book`, `MarketResolved` and `NewMarket` (no text search needed, since events arrive decoded) after each event is written, feeding `BooksSeen` to the connection manager and notices to the registry.
 4. **Connection manager: `awaiting_book`.** Track tokens subscribed without a full book, request a `missing_book` snapshot after 2 minutes, then mark the token unhealthy. Needs `BooksSeen` from the frame inspector and snapshot worker. Also replace `run`'s placeholder consumers of the write queue and snapshot channel once the writer and snapshot worker exist.
 5. **Snapshot worker.** Deduplicating FIFO, batches of up to 500, `POST /books` through a CLOB client (none exists yet), token-bucket rate limiter, 3 retries then `snapshot_failed` and re-queue, and the hourly schedule spread across the hour.
 6. **Status reporter.** Shared atomic counters, the status file every 5 s written by temp-file-and-rename, and `state/tracked_tokens.json`.
@@ -156,16 +160,16 @@ None of this exists, and no Parquet dependency is in `Cargo.toml` yet. `rust_dec
 
 ### 4.1 What exists
 
-135 tests, all passing (`just archiver test`, about 1 s).
+122 tests, all passing (`just archiver test`, under 1 s).
 
 | Module | Tests | Coverage against section 14 |
 | --- | --- | --- |
-| Connection state machine | 49 | Every case in the "Connection state machine" and "Heartbeat and liveness" tables, plus stale-event handling, shutdown from each state, and a randomised test checking the gap contract over many event sequences, as section 10 asks for |
+| Connection state machine | 38 | The cases of the "Connection state machine" table that still apply (heartbeat and liveness belong to marcasite now), plus `Retry-After`, a timeout becoming a `heartbeat_timeout` gap, token changes while connecting, stale-event handling, shutdown from each state, and a randomised test checking the gap contract over many event sequences, as section 10 asks for |
 | Configuration | 18 | Every case in the "Configuration" table except command-line override, which is not implemented. Also checks the shipped `config.toml` is valid |
 | Backoff calculator | 4 | First failure, doubling, cap, jitter bounds. The reset and no-reset cases are covered in the connection tests |
 | Token assignment | 7 | Every case in the "Token assignment" table, plus ignoring already placed and unknown tokens |
 | Gap tracker | 4 | Every case in the "Gap tracker" table except "Start time", which is the state machine's (covered there) |
-| Connection manager | 10 | The "Streaming path" group of section 14.4 against a fake websocket server: integration scenarios 2–4, 11 without the writer, and live subscribe and unsubscribe; plus the subscription message format and `last_message_at` precision |
+| Connection manager | 8 | The "Streaming path" group of section 14.4 against a fake websocket server: integration scenarios 2, 4, 11 without the writer, and live subscribe and unsubscribe; plus decoding outcomes and `last_message_at` precision |
 | Registry | 43 | The "selection rules" and "difference and sanity check" tables, plus market parsing (outcome order, missing fields, wrong token count), details changed, token-ID changes, websocket resolution before tracking, the re-add block, and `registry_task` against a fake Gamma (error keeps the set, rejection writes `registry_rejected`, notice bursts coalesce, expiry while Gamma is down, cancellation, fatal channel loss) |
 
 The connection tests use their own harness with tokio's paused clock and a scripted random source, which serves as the design's fake clock for that module. `TokioClock` exists for wall-clock time in other tests but is not used yet.
@@ -181,7 +185,7 @@ The connection tests use their own harness with tokio's paused clock and a scrip
 | Tool | State |
 | --- | --- |
 | Fake clock | Partly there: tokio paused time plus `TokioClock` |
-| Fake Polymarket server (websocket, `/books`, Gamma) | Websocket only (`connection_manager/fake_server.rs`): scripted connections, `PONG` replies that can be switched off, refused handshakes |
+| Fake Polymarket server (websocket, `/books`, Gamma) | Websocket only (`connection_manager/fake_server.rs`): scripted connections that answer `PING`, refused handshakes |
 | Recorded fixtures from real Polymarket | None |
 | Temporary archive folder helper | Not started |
 | Archive reader helper | Not started |
@@ -193,7 +197,8 @@ The connection tests use their own harness with tokio's paused clock and a scrip
 Places where `design.md` no longer matches the code and could be updated:
 
 - Config key names and the two extra settings (2.1).
-- No `Closing` connection state; socket events carry attempt IDs; `SubscribeSent` event (2.2).
+- No `Subscribing` or `Closing` connection state, no heartbeat or connect timeout in the state machine (marcasite's channel owns them); `Retry-After` honoured; socket events carry attempt IDs (2.2).
+- Websocket records hold marcasite's decoded `MarketEvent`, not the raw frame text, and undecodable messages are a `frame_decode_failed` control record (2.6).
 - `GapClose` carries a reason; a close without an open gap is silent, not a warning (2.6).
 - `tokens_per_connection` must be at least 2, so a market fits on one connection.
 - The `Clock` interface is wall-clock only, with monotonic time from tokio (2.3).

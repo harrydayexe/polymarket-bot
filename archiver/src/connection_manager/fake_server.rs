@@ -71,13 +71,6 @@ impl FakeServer {
             .expect("timed out waiting for a connection")
             .expect("server stopped")
     }
-
-    /// Asserts that no connection is opened within `d`.
-    pub async fn assert_no_connection_within(&mut self, d: Duration) {
-        if let Ok(conn) = tokio::time::timeout(d, self.accepted.recv()).await {
-            panic!("unexpected connection: {:?}", conn.is_some());
-        }
-    }
 }
 
 enum Command {
@@ -85,27 +78,22 @@ enum Command {
     Close,
 }
 
-/// The server side of one connection. Answers `PING` with `PONG` unless told to stop.
+/// The server side of one connection. Answers `PING` with `PONG`, as the real server does.
 pub struct FakeConn {
     from_client: mpsc::UnboundedReceiver<String>,
     to_client: mpsc::UnboundedSender<Command>,
-    answer_pings: Arc<AtomicBool>,
 }
 
 impl FakeConn {
     fn serve(mut socket: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>) -> Self {
         let (from_client_tx, from_client) = mpsc::unbounded_channel();
         let (to_client, mut commands) = mpsc::unbounded_channel();
-        let answer_pings = Arc::new(AtomicBool::new(true));
-        let answering = answer_pings.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     msg = socket.next() => match msg {
                         Some(Ok(Message::Text(text))) if text.as_str() == "PING" => {
-                            if answering.load(Ordering::SeqCst) {
-                                let _ = socket.send(Message::text("PONG")).await;
-                            }
+                            let _ = socket.send(Message::text("PONG")).await;
                         }
                         Some(Ok(Message::Text(text))) => {
                             let _ = from_client_tx.send(text.as_str().to_owned());
@@ -127,7 +115,6 @@ impl FakeConn {
         Self {
             from_client,
             to_client,
-            answer_pings,
         }
     }
 
@@ -149,10 +136,6 @@ impl FakeConn {
 
     pub fn close(&self) {
         let _ = self.to_client.send(Command::Close);
-    }
-
-    pub fn stop_answering_pings(&self) {
-        self.answer_pings.store(false, Ordering::SeqCst);
     }
 
     /// Waits for the client to close the connection.

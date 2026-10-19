@@ -1,30 +1,25 @@
 use std::{
+    ops::ControlFlow,
     sync::{
         Arc,
         atomic::{AtomicI64, Ordering},
     },
-    time::Duration,
 };
 
 use chrono::{DateTime, SubsecRound, Utc};
-use marcasite_core::{
-    Service,
-    ws::{WsConfig, WsConnection, WsSender},
+use futures::StreamExt;
+use marcasite::{
+    Error, WebSocketErrorKind,
+    ws::{MarketChannelBuilder, MarketChannelHandle, MarketSubscription},
 };
-use tokio::{
-    sync::mpsc::{self, error::TrySendError},
-    time::Instant,
-};
+use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     clock::SharedClock,
     connection_manager::types::{ConnAttemptId, ConnSlotId, SocketEvent},
-    messages::Record,
+    messages::{ControlBody, Record},
 };
-
-/// The server's reply to the `PING` heartbeat. Reported, not recorded.
-const PONG: &str = "PONG";
 
 /// Receive time of the last frame on one connection attempt. Written by its socket task only,
 /// read by the connection manager on every tick.
@@ -57,11 +52,11 @@ pub struct SocketReport {
 
 #[derive(Debug)]
 pub enum ReportKind {
-    /// The socket opened; frames are sent through this sender.
-    Opened(WsSender),
+    /// The channel connected and subscribed; subscription changes go through this handle.
+    Opened(MarketChannelHandle),
     Event(SocketEvent),
-    /// How many frames were dropped because the write queue was full, reported once the
-    /// socket has ended.
+    /// How many records were dropped because the write queue was full, reported once the
+    /// channel has ended.
     FramesDropped(u64),
 }
 
@@ -69,37 +64,37 @@ pub enum ReportKind {
 pub struct SocketTask {
     pub slot: ConnSlotId,
     pub attempt_id: ConnAttemptId,
-    pub url: url::Url,
-    pub connect_timeout: Duration,
+    /// URL, timeouts and heartbeat of the market channel.
+    pub channel: MarketChannelBuilder,
+    pub subscription: MarketSubscription,
     pub write_queue: mpsc::Sender<Record>,
     pub reports: mpsc::UnboundedSender<SocketReport>,
     pub last_message_at: LastMessageAt,
     pub clock: SharedClock,
-    /// Cancelled by the manager to close the socket. Frames already received are still
+    /// Cancelled by the manager to close the channel. Events already received are still
     /// recorded while the close completes.
     pub cancel: CancellationToken,
 }
 
 impl SocketTask {
-    /// Opens the socket, then reads it until it ends: every frame is stamped with its receive
-    /// time and put on the write queue, and nothing else is done with it.
+    /// Connects the market channel, then reads it until it ends: every event is stamped with
+    /// its receive time and put on the write queue, and nothing else is done with it.
     pub async fn run(self) {
-        let config = WsConfig::new(Service::MarketChannel, self.url.clone())
-            .connect_timeout(self.connect_timeout);
         let connected = tokio::select! {
             _ = self.cancel.cancelled() => return,
-            r = WsConnection::connect(config) => r,
+            r = self.channel.clone().connect(self.subscription.clone()) => r,
         };
-        let mut conn = match connected {
-            Ok(conn) => conn,
+        let mut channel = match connected {
+            Ok(channel) => channel,
             Err(e) => {
                 self.report(ReportKind::Event(SocketEvent::Failed {
+                    retry_after: e.retry_after(),
                     error: e.to_string(),
                 }));
                 return;
             }
         };
-        self.report(ReportKind::Opened(conn.sender()));
+        self.report(ReportKind::Opened(channel.handle()));
 
         let mut closing = false;
         let mut dropped = 0u64;
@@ -107,53 +102,57 @@ impl SocketTask {
             let item = tokio::select! {
                 biased;
                 _ = self.cancel.cancelled(), if !closing => {
-                    // The driver completes the close handshake within a bounded time, then
+                    // The channel completes the close handshake within a bounded time, then
                     // ends the stream.
-                    conn.close();
+                    channel.close();
                     closing = true;
                     continue;
                 }
-                item = conn.recv() => item,
+                item = channel.next() => item,
             };
-            let text = match item {
-                Some(Ok(text)) => text,
+            // Microseconds, as recorded on disk, so the gap start matches the frame exactly.
+            let recv_ts = self.clock.now().trunc_subsecs(6);
+            let record = match item {
+                Some(Ok(event)) => Record::WsFrame {
+                    recv_ts,
+                    conn_id: self.attempt_id.clone(),
+                    event,
+                },
+                // Not fatal: the stream goes on. The message cannot be archived, so record the
+                // error, which quotes it.
+                Some(Err(Error::WebSocket(e))) if e.kind() == WebSocketErrorKind::Decode => {
+                    tracing::warn!(attempt = %self.attempt_id, error = %e, "undecodable frame");
+                    Record::Control {
+                        recv_ts,
+                        conn_id: Some(self.attempt_id.clone()),
+                        body: ControlBody::FrameDecodeFailed {
+                            error: e.to_string(),
+                        },
+                    }
+                }
                 Some(Err(e)) => {
-                    self.report_closed(closing, e.to_string());
+                    self.report_lost(closing, lost_event(e));
                     break;
                 }
                 None => {
-                    self.report_closed(closing, "closed by the server".into());
+                    self.report_lost(
+                        closing,
+                        SocketEvent::Closed {
+                            reason: "closed by the server".into(),
+                        },
+                    );
                     break;
                 }
             };
-
-            // Microseconds, as recorded on disk, so the gap start matches the frame exactly.
-            let recv_ts = self.clock.now().trunc_subsecs(6);
-            if text == PONG {
-                self.report(ReportKind::Event(SocketEvent::PongReceived {
-                    at: Instant::now(),
-                }));
-                continue;
-            }
             self.last_message_at.set(recv_ts);
-            let record = Record::WsFrame {
-                recv_ts,
-                conn_id: self.attempt_id.clone(),
-                raw: text,
-            };
-            match self.write_queue.try_send(record) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => {
-                    dropped += 1;
-                    if dropped == 1 {
-                        self.report(ReportKind::Event(SocketEvent::QueueOverflow));
-                    }
-                }
-                Err(TrySendError::Closed(_)) => {
-                    tracing::error!(attempt = %self.attempt_id, "write queue closed, closing socket");
-                    self.report_closed(closing, "write queue closed".into());
-                    break;
-                }
+            if self.put(record, &mut dropped).is_break() {
+                self.report_lost(
+                    closing,
+                    SocketEvent::Closed {
+                        reason: "write queue closed".into(),
+                    },
+                );
+                break;
             }
         }
 
@@ -162,10 +161,33 @@ impl SocketTask {
         }
     }
 
-    /// Reports the end of a socket the manager did not ask to close.
-    fn report_closed(&self, closing: bool, reason: String) {
+    /// Puts `record` on the write queue without waiting. A full queue drops it, reporting the
+    /// first drop.
+    ///
+    /// # Returns
+    ///
+    /// `Break` if the write queue has closed.
+    fn put(&self, record: Record, dropped: &mut u64) -> ControlFlow<()> {
+        match self.write_queue.try_send(record) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                *dropped += 1;
+                if *dropped == 1 {
+                    self.report(ReportKind::Event(SocketEvent::QueueOverflow));
+                }
+            }
+            Err(TrySendError::Closed(_)) => {
+                tracing::error!(attempt = %self.attempt_id, "write queue closed, closing socket");
+                return ControlFlow::Break(());
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// Reports the end of a channel the manager did not ask to close.
+    fn report_lost(&self, closing: bool, event: SocketEvent) {
         if !closing {
-            self.report(ReportKind::Event(SocketEvent::Closed { reason }));
+            self.report(ReportKind::Event(event));
         }
     }
 
@@ -176,6 +198,19 @@ impl SocketTask {
             attempt_id: self.attempt_id.clone(),
             kind,
         });
+    }
+}
+
+/// The event for the final error of a channel.
+fn lost_event(e: Error) -> SocketEvent {
+    match &e {
+        // No frame within the idle timeout (the heartbeat went unanswered), or a stalled write.
+        Error::WebSocket(ws) if ws.kind() == WebSocketErrorKind::Timeout => SocketEvent::TimedOut {
+            error: e.to_string(),
+        },
+        _ => SocketEvent::Closed {
+            reason: e.to_string(),
+        },
     }
 }
 

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Duration};
 
 use chrono::{DateTime, Utc};
 use marcasite::types::TokenId;
@@ -27,12 +27,11 @@ pub struct Connection {
     state: ConnectionState,
     /// Which tokens the connection *should* be subscribed to.
     assigned_tokens: HashSet<TokenId>,
-    /// The currently subscribed to token set.
+    /// The tokens the current socket subscribes to. While connecting, the tokens its
+    /// subscription asks for; it is sent as the socket opens.
     subscribed_tokens: HashSet<TokenId>,
     /// Should be written by the socket reader only.
     last_message_at: Option<DateTime<Utc>>,
-    last_pong_at: Option<Instant>,
-    last_ping_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -46,7 +45,6 @@ impl Connection {
     pub fn new(
         slot_id: ConnSlotId,
         tokens: HashSet<TokenId>,
-        now: Now,
         cfg: &Config,
     ) -> (Self, Vec<ConnectionAction>) {
         let mut connection = Connection {
@@ -58,15 +56,9 @@ impl Connection {
             assigned_tokens: tokens,
             subscribed_tokens: HashSet::new(),
             last_message_at: None,
-            last_pong_at: None,
-            last_ping_at: None,
         };
-        let actions = start_attempt(&mut connection, now, cfg);
+        let actions = start_attempt(&mut connection, cfg);
         (connection, actions)
-    }
-
-    pub fn slot_id(&self) -> &ConnSlotId {
-        &self.slot_id
     }
 
     pub fn attempt_id(&self) -> Option<&ConnAttemptId> {
@@ -81,12 +73,9 @@ impl Connection {
         &self.assigned_tokens
     }
 
+    #[cfg(test)]
     pub fn subscribed_tokens(&self) -> &HashSet<TokenId> {
         &self.subscribed_tokens
-    }
-
-    pub fn last_pong_at(&self) -> Option<Instant> {
-        self.last_pong_at
     }
 }
 
@@ -94,45 +83,41 @@ impl Connection {
 fn socket_live(state: ConnectionState) -> bool {
     matches!(
         state,
-        ConnectionState::Connecting { .. }
-            | ConnectionState::Subscribing { .. }
-            | ConnectionState::Streaming { .. }
+        ConnectionState::Connecting | ConnectionState::Streaming { .. }
     )
 }
 
 /// The socket opened and a `Connect` control record was emitted, so leaving this state must
 /// emit the matching `Disconnect`.
 fn socket_open(state: ConnectionState) -> bool {
-    matches!(
-        state,
-        ConnectionState::Subscribing { .. } | ConnectionState::Streaming { .. }
-    )
+    matches!(state, ConnectionState::Streaming { .. })
 }
 
-fn start_attempt(c: &mut Connection, now: Now, cfg: &Config) -> Vec<ConnectionAction> {
+fn start_attempt(c: &mut Connection, cfg: &Config) -> Vec<ConnectionAction> {
     c.attempt_seq += 1;
     let id = ConnAttemptId::create(c.slot_id.clone(), c.attempt_seq);
     c.attempt_id = Some(id.clone());
     c.last_message_at = None;
-    c.last_pong_at = None;
-    c.last_ping_at = None;
-    c.state = ConnectionState::Connecting {
-        started_at: now.mono,
-    };
+    c.subscribed_tokens = c.assigned_tokens.clone();
+    c.state = ConnectionState::Connecting;
     vec![ConnectionAction::OpenSocket {
         url: cfg.websocket_url.clone(),
         attempt_id: id,
+        tokens: c.subscribed_tokens.clone(),
     }]
 }
 
+/// Gives up on the current socket and waits before the next attempt. The wait is at least
+/// `retry_after`, if the server asked for one.
 fn enter_backoff(
     c: &mut Connection,
     reason: GapReason,
+    retry_after: Option<Duration>,
     now: Now,
     cfg: &Config,
     rng: &mut impl RandomSource,
 ) -> Vec<ConnectionAction> {
-    if let ConnectionState::Streaming { since, .. } = c.state
+    if let ConnectionState::Streaming { since } = c.state
         && now.mono - since >= cfg.backoff_reset_after
     {
         c.failures = 0;
@@ -140,7 +125,7 @@ fn enter_backoff(
     let was_open = socket_open(c.state);
 
     c.failures += 1;
-    let delay = backoff_delay(c.failures, cfg, rng);
+    let delay = backoff_delay(c.failures, cfg, rng).max(retry_after.unwrap_or_default());
     c.subscribed_tokens.clear();
     c.state = ConnectionState::Backoff {
         until: now.mono + delay,
@@ -234,8 +219,9 @@ fn unsubscribe(c: &mut Connection, tokens: HashSet<TokenId>) -> Vec<ConnectionAc
 }
 
 /// Removes tokens from the assigned set in any open state. Only a streaming connection
-/// unsubscribes on the wire; in every other state the next subscribe simply leaves them out.
-/// Closes the connection once no tokens are left.
+/// unsubscribes on the wire; while connecting, the change is made once the socket opens, and in
+/// backoff the next subscription simply leaves them out. Closes the connection once no tokens
+/// are left.
 fn remove_tokens(
     c: &mut Connection,
     mut tokens: HashSet<TokenId>,
@@ -271,12 +257,15 @@ fn socket_lost_or_unexpected(
     config: &Config,
     rng: &mut impl RandomSource,
 ) -> Vec<ConnectionAction> {
-    let reason = match event {
-        SocketEvent::Failed { error } => GapReason::ConnectFailed { error },
-        SocketEvent::Closed { reason } => GapReason::ConnectionClosed { error: reason },
-        SocketEvent::SendFailed { error } => GapReason::ConnectionClosed { error },
-        SocketEvent::QueueOverflow => GapReason::QueueOverflow,
-        e => {
+    let (reason, retry_after) = match event {
+        SocketEvent::Failed { error, retry_after } => {
+            (GapReason::ConnectFailed { error }, retry_after)
+        }
+        SocketEvent::Closed { reason } => (GapReason::ConnectionClosed { error: reason }, None),
+        SocketEvent::TimedOut { .. } => (GapReason::HeartbeatTimeout, None),
+        SocketEvent::SendFailed { error } => (GapReason::ConnectionClosed { error }, None),
+        SocketEvent::QueueOverflow => (GapReason::QueueOverflow, None),
+        e @ SocketEvent::Opened => {
             tracing::warn!(
                 "unexpected event for slot {} in state {:?}: {}",
                 c.slot_id,
@@ -286,7 +275,7 @@ fn socket_lost_or_unexpected(
             return vec![];
         }
     };
-    enter_backoff(c, reason, now, config, rng)
+    enter_backoff(c, reason, retry_after, now, config, rng)
 }
 
 fn connecting_state_transition(
@@ -296,88 +285,37 @@ fn connecting_state_transition(
     config: &Config,
     rng: &mut impl RandomSource,
 ) -> Vec<ConnectionAction> {
-    let ConnectionState::Connecting { started_at } = connection.state else {
-        unreachable!("expected connection state to be ConnectionState::Connecting");
-    };
     match event {
         ConnectionEvent::Socket {
             event: SocketEvent::Opened,
             ..
         } => {
-            connection.subscribed_tokens = connection.assigned_tokens.clone();
-            connection.state = ConnectionState::Subscribing { since: now.mono };
-            vec![
+            connection.state = ConnectionState::Streaming { since: now.mono };
+            let subscribed = connection.subscribed_tokens.clone();
+            let mut actions = vec![
                 ConnectionAction::Emit {
                     body: ControlBody::Connect {
                         slot: connection.slot_id.clone(),
-                        token_count: connection.assigned_tokens.len(),
+                        token_count: subscribed.len(),
                     },
                 },
-                ConnectionAction::SendSubscribe {
-                    tokens: connection.assigned_tokens.clone(),
-                },
                 ConnectionAction::RequestSnapshot {
-                    tokens: connection.assigned_tokens.clone(),
+                    tokens: subscribed.clone(),
                     reason: SnapshotReason::Subscribe,
                 },
                 ConnectionAction::CloseGaps {
-                    tokens: connection.assigned_tokens.clone(),
+                    tokens: subscribed.clone(),
                     end: now.wall,
                     reason: GapReason::Resumed,
                 },
                 ConnectionAction::Emit {
                     body: ControlBody::Subscribe {
                         slot: connection.slot_id.clone(),
-                        tokens: connection.assigned_tokens.clone(),
+                        tokens: subscribed,
                     },
                 },
-            ]
-        }
-        ConnectionEvent::Socket { event, .. } => {
-            socket_lost_or_unexpected(connection, event, now, config, rng)
-        }
-        ConnectionEvent::Tick { .. } if now.mono - started_at >= config.connect_timeout => {
-            enter_backoff(
-                connection,
-                GapReason::ConnectFailed {
-                    error: "connect timed out".to_string(),
-                },
-                now,
-                config,
-                rng,
-            )
-        }
-        ConnectionEvent::Tick { .. } => vec![],
-        ConnectionEvent::TokensAssigned { tokens } => {
-            connection.assigned_tokens.extend(tokens);
-            vec![]
-        }
-        ConnectionEvent::TokensRemoved { tokens } => remove_tokens(connection, tokens, now),
-        ConnectionEvent::Shutdown => shutdown(connection, now),
-    }
-}
-
-fn subscribing_state_transition(
-    connection: &mut Connection,
-    event: ConnectionEvent,
-    now: Now,
-    config: &Config,
-    rng: &mut impl RandomSource,
-) -> Vec<ConnectionAction> {
-    let ConnectionState::Subscribing { since } = connection.state else {
-        unreachable!("expected connection state to be ConnectionState::Subscribing");
-    };
-    match event {
-        ConnectionEvent::Socket {
-            event: SocketEvent::SubscribeSent,
-            ..
-        } => {
-            connection.state = ConnectionState::Streaming {
-                since: now.mono,
-                next_ping_at: now.mono + config.heartbeat_interval,
-                pong_deadline: now.mono + config.heartbeat_timeout,
-            };
-            // Token changes that arrived while the first subscribe was in flight.
+            ];
+            // Token changes that arrived while connecting.
             let to_add: HashSet<TokenId> = connection
                 .assigned_tokens
                 .difference(&connection.subscribed_tokens)
@@ -388,7 +326,6 @@ fn subscribing_state_transition(
                 .difference(&connection.assigned_tokens)
                 .cloned()
                 .collect();
-            let mut actions = vec![];
             if !to_add.is_empty() {
                 actions.extend(subscribe_new(connection, to_add));
             }
@@ -400,19 +337,8 @@ fn subscribing_state_transition(
         ConnectionEvent::Socket { event, .. } => {
             socket_lost_or_unexpected(connection, event, now, config, rng)
         }
-        ConnectionEvent::Tick { .. } if now.mono - since >= config.connect_timeout => {
-            enter_backoff(
-                connection,
-                GapReason::ConnectFailed {
-                    error: "subscribe timed out".to_string(),
-                },
-                now,
-                config,
-                rng,
-            )
-        }
         ConnectionEvent::Tick { .. } => vec![],
-        // Applied by the reconciliation once the subscribe in flight has been sent.
+        // Applied once the socket opens.
         ConnectionEvent::TokensAssigned { tokens } => {
             connection.assigned_tokens.extend(tokens);
             vec![]
@@ -429,45 +355,8 @@ fn streaming_state_transition(
     config: &Config,
     rng: &mut impl RandomSource,
 ) -> Vec<ConnectionAction> {
-    let ConnectionState::Streaming {
-        since,
-        next_ping_at,
-        pong_deadline,
-    } = connection.state
-    else {
-        unreachable!("expected connection state to be ConnectionState::Streaming");
-    };
     match event {
-        ConnectionEvent::Tick { .. } if now.mono >= pong_deadline => {
-            enter_backoff(connection, GapReason::HeartbeatTimeout, now, config, rng)
-        }
-        ConnectionEvent::Tick { .. } if now.mono >= next_ping_at => {
-            connection.state = ConnectionState::Streaming {
-                since,
-                next_ping_at: now.mono + config.heartbeat_interval,
-                pong_deadline,
-            };
-            connection.last_ping_at = Some(now.mono);
-            vec![ConnectionAction::SendPing]
-        }
         ConnectionEvent::Tick { .. } => vec![],
-        ConnectionEvent::Socket {
-            event: SocketEvent::PongReceived { at },
-            ..
-        } => {
-            connection.last_pong_at = Some(at);
-            connection.state = ConnectionState::Streaming {
-                since,
-                next_ping_at,
-                pong_deadline: pong_deadline.max(at + config.heartbeat_timeout),
-            };
-            vec![]
-        }
-        // Completion of a live subscribe; nothing to do.
-        ConnectionEvent::Socket {
-            event: SocketEvent::SubscribeSent,
-            ..
-        } => vec![],
         ConnectionEvent::Socket { event, .. } => {
             socket_lost_or_unexpected(connection, event, now, config, rng)
         }
@@ -497,7 +386,7 @@ fn backoff_state_transition(
         unreachable!("expected connection state to be ConnectionState::Backoff");
     };
     match event {
-        ConnectionEvent::Tick { .. } if now.mono >= until => start_attempt(connection, now, config),
+        ConnectionEvent::Tick { .. } if now.mono >= until => start_attempt(connection, config),
         ConnectionEvent::Tick { .. } => vec![],
         // Late events from the socket this connection just closed, e.g. the close we asked for.
         ConnectionEvent::Socket { event, .. } => {
@@ -572,11 +461,8 @@ pub fn step(
     }
 
     match connection.state {
-        ConnectionState::Connecting { .. } => {
+        ConnectionState::Connecting => {
             connecting_state_transition(connection, event, now, config, rng)
-        }
-        ConnectionState::Subscribing { .. } => {
-            subscribing_state_transition(connection, event, now, config, rng)
         }
         ConnectionState::Streaming { .. } => {
             streaming_state_transition(connection, event, now, config, rng)
@@ -588,9 +474,7 @@ pub fn step(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use chrono::{TimeDelta, TimeZone};
+    use chrono::TimeZone;
 
     use super::*;
 
@@ -625,6 +509,13 @@ mod tests {
         Duration::from_millis(ms)
     }
 
+    fn refused() -> SocketEvent {
+        SocketEvent::Failed {
+            error: "refused".into(),
+            retry_after: None,
+        }
+    }
+
     fn disconnect(reason: &str) -> ConnectionAction {
         ConnectionAction::Emit {
             body: ControlBody::Disconnect {
@@ -652,26 +543,21 @@ mod tests {
 
         fn with_tokens(t: HashSet<TokenId>) -> Self {
             let cfg = Config::default();
-            let start_mono = Instant::now();
-            let start_wall = Utc.with_ymd_and_hms(2026, 9, 25, 14, 0, 0).unwrap();
-            let now = Now {
-                mono: start_mono,
-                wall: start_wall,
-            };
-            let (conn, actions) = Connection::new(slot(), t, now, &cfg);
+            let (conn, actions) = Connection::new(slot(), t.clone(), &cfg);
             assert_eq!(
                 actions,
                 vec![ConnectionAction::OpenSocket {
                     url: cfg.websocket_url.clone(),
                     attempt_id: attempt(1),
+                    tokens: t,
                 }]
             );
             Harness {
                 conn,
                 cfg,
                 rng: FixedRandom(0.0),
-                start_mono,
-                start_wall,
+                start_mono: Instant::now(),
+                start_wall: Utc.with_ymd_and_hms(2026, 9, 25, 14, 0, 0).unwrap(),
                 elapsed: Duration::ZERO,
             }
         }
@@ -679,7 +565,7 @@ mod tests {
         fn now(&self) -> Now {
             Now {
                 mono: self.start_mono + self.elapsed,
-                wall: self.start_wall + TimeDelta::from_std(self.elapsed).unwrap(),
+                wall: self.start_wall + chrono::TimeDelta::from_std(self.elapsed).unwrap(),
             }
         }
 
@@ -729,11 +615,6 @@ mod tests {
             self.tick()
         }
 
-        fn pong(&mut self) -> Vec<ConnectionAction> {
-            let at = self.mono();
-            self.socket(SocketEvent::PongReceived { at })
-        }
-
         fn assign(&mut self, t: HashSet<TokenId>) -> Vec<ConnectionAction> {
             self.send(ConnectionEvent::TokensAssigned { tokens: t })
         }
@@ -742,29 +623,20 @@ mod tests {
             self.send(ConnectionEvent::TokensRemoved { tokens: t })
         }
 
-        fn subscribing(mut self) -> Self {
+        fn streaming(mut self) -> Self {
             self.socket(SocketEvent::Opened);
-            assert!(matches!(self.state(), ConnectionState::Subscribing { .. }));
+            assert!(matches!(self.state(), ConnectionState::Streaming { .. }));
             self
         }
 
-        fn streaming(self) -> Self {
-            let mut h = self.subscribing();
-            h.socket(SocketEvent::SubscribeSent);
-            assert!(matches!(h.state(), ConnectionState::Streaming { .. }));
-            h
-        }
-
         fn backoff(mut self) -> Self {
-            self.socket(SocketEvent::Failed {
-                error: "refused".into(),
-            });
+            self.socket(refused());
             assert!(matches!(self.state(), ConnectionState::Backoff { .. }));
             self
         }
 
         /// Waits out the current backoff and starts the next attempt.
-        fn reconnect(&mut self) {
+        fn reconnect(&mut self) -> Vec<ConnectionAction> {
             let ConnectionState::Backoff { until } = self.state() else {
                 panic!("expected backoff, got {:?}", self.state());
             };
@@ -774,18 +646,7 @@ mod tests {
                 matches!(actions.as_slice(), [ConnectionAction::OpenSocket { .. }]),
                 "{actions:?}"
             );
-        }
-
-        /// Streams for `d`, answering pings so the heartbeat stays healthy.
-        fn stream_for(&mut self, d: Duration) {
-            let mut left = d;
-            while !left.is_zero() {
-                let step = left.min(self.cfg.heartbeat_interval);
-                self.tick_after(step);
-                self.pong();
-                left -= step;
-            }
-            assert!(matches!(self.state(), ConnectionState::Streaming { .. }));
+            actions
         }
 
         /// The wait of the backoff just entered.
@@ -800,11 +661,11 @@ mod tests {
     // Connecting
 
     #[test]
-    fn connect_succeeds_subscribes_all_tokens() {
+    fn socket_opened_starts_streaming_with_every_token() {
         let mut h = Harness::new();
         let actions = h.socket(SocketEvent::Opened);
 
-        assert_eq!(h.state(), ConnectionState::Subscribing { since: h.mono() });
+        assert_eq!(h.state(), ConnectionState::Streaming { since: h.mono() });
         assert_eq!(
             actions,
             vec![
@@ -813,9 +674,6 @@ mod tests {
                         slot: slot(),
                         token_count: 4,
                     },
-                },
-                ConnectionAction::SendSubscribe {
-                    tokens: tokens(1..=4),
                 },
                 ConnectionAction::RequestSnapshot {
                     tokens: tokens(1..=4),
@@ -841,9 +699,7 @@ mod tests {
     fn connect_fails_opens_gaps_without_disconnect() {
         let mut h = Harness::new();
         h.advance(millis(500));
-        let actions = h.socket(SocketEvent::Failed {
-            error: "refused".into(),
-        });
+        let actions = h.socket(refused());
 
         assert_eq!(
             h.state(),
@@ -867,32 +723,35 @@ mod tests {
     }
 
     #[test]
-    fn connect_times_out() {
+    fn connecting_has_no_timeout_of_its_own() {
+        // The channel bounds the handshake and reports a failure.
         let mut h = Harness::new();
-        assert_eq!(h.tick_after(millis(9_900)), vec![]);
-        assert!(matches!(h.state(), ConnectionState::Connecting { .. }));
-
-        let actions = h.tick_after(millis(100));
-        assert!(matches!(h.state(), ConnectionState::Backoff { .. }));
-        assert_eq!(
-            actions,
-            vec![
-                ConnectionAction::CloseSocket,
-                ConnectionAction::OpenGaps {
-                    tokens: tokens(1..=4),
-                    start: h.wall(),
-                    reason: GapReason::ConnectFailed {
-                        error: "connect timed out".into()
-                    },
-                },
-            ]
-        );
+        assert_eq!(h.tick_after(Duration::from_mins(10)), vec![]);
+        assert_eq!(h.state(), ConnectionState::Connecting);
     }
 
     #[test]
-    fn tokens_changed_while_connecting_are_used_by_the_subscribe() {
+    fn retry_after_lengthens_the_backoff() {
         let mut h = Harness::new();
-        assert_eq!(h.assign(tokens([5])), vec![]);
+        h.socket(SocketEvent::Failed {
+            error: "429".into(),
+            retry_after: Some(secs(20)),
+        });
+        assert_eq!(h.backoff_wait(), secs(20));
+
+        // A shorter request does not shorten the usual wait.
+        h.reconnect();
+        h.socket(SocketEvent::Failed {
+            error: "429".into(),
+            retry_after: Some(millis(10)),
+        });
+        assert_eq!(h.backoff_wait(), secs(2));
+    }
+
+    #[test]
+    fn tokens_changed_while_connecting_are_reconciled_once_open() {
+        let mut h = Harness::new();
+        assert_eq!(h.assign(tokens([5, 6])), vec![]);
         assert_eq!(
             h.remove(tokens([1, 99])),
             vec![ConnectionAction::CloseGaps {
@@ -902,132 +761,11 @@ mod tests {
             }]
         );
 
+        // The socket subscribed to the tokens it was opened with.
         let actions = h.socket(SocketEvent::Opened);
-        assert!(actions.contains(&ConnectionAction::SendSubscribe {
-            tokens: tokens(2..=5)
-        }));
-    }
-
-    #[test]
-    fn all_tokens_removed_while_connecting_closes_without_disconnect() {
-        let mut h = Harness::new();
-        let actions = h.remove(tokens(1..=4));
-
-        assert_eq!(h.state(), ConnectionState::Closed);
         assert_eq!(
-            actions,
-            vec![
-                ConnectionAction::CloseGaps {
-                    tokens: tokens(1..=4),
-                    end: h.wall(),
-                    reason: GapReason::Unsubscribed,
-                },
-                ConnectionAction::CloseSocket,
-            ]
-        );
-    }
-
-    #[test]
-    fn socket_closed_while_connecting_backs_off() {
-        let mut h = Harness::new();
-        h.socket(SocketEvent::Closed {
-            reason: "reset".into(),
-        });
-        assert!(matches!(h.state(), ConnectionState::Backoff { .. }));
-    }
-
-    #[test]
-    fn unexpected_socket_events_while_connecting_are_ignored() {
-        let mut h = Harness::new();
-        let at = h.mono();
-        assert_eq!(h.socket(SocketEvent::PongReceived { at }), vec![]);
-        assert_eq!(h.socket(SocketEvent::SubscribeSent), vec![]);
-        assert!(matches!(h.state(), ConnectionState::Connecting { .. }));
-    }
-
-    // Subscribing
-
-    #[test]
-    fn subscribe_sent_starts_streaming() {
-        let mut h = Harness::new().subscribing();
-        h.advance(millis(50));
-        assert_eq!(h.socket(SocketEvent::SubscribeSent), vec![]);
-        assert_eq!(
-            h.state(),
-            ConnectionState::Streaming {
-                since: h.mono(),
-                next_ping_at: h.mono() + secs(10),
-                pong_deadline: h.mono() + secs(30),
-            }
-        );
-    }
-
-    #[test]
-    fn subscribe_times_out() {
-        let mut h = Harness::new().subscribing();
-        assert_eq!(h.tick_after(millis(9_900)), vec![]);
-        let actions = h.tick_after(millis(100));
-
-        assert!(matches!(h.state(), ConnectionState::Backoff { .. }));
-        let reason = GapReason::ConnectFailed {
-            error: "subscribe timed out".into(),
-        };
-        assert_eq!(
-            actions,
-            vec![
-                ConnectionAction::CloseSocket,
-                ConnectionAction::OpenGaps {
-                    tokens: tokens(1..=4),
-                    start: h.wall(),
-                    reason: reason.clone(),
-                },
-                disconnect(&reason.to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn subscribe_send_failure_backs_off_and_disconnects() {
-        let mut h = Harness::new().subscribing();
-        let actions = h.socket(SocketEvent::SendFailed {
-            error: "broken pipe".into(),
-        });
-
-        assert!(matches!(h.state(), ConnectionState::Backoff { .. }));
-        assert!(h.conn.subscribed_tokens().is_empty());
-        assert_eq!(
-            actions,
-            vec![
-                ConnectionAction::CloseSocket,
-                ConnectionAction::OpenGaps {
-                    tokens: tokens(1..=4),
-                    start: h.wall(),
-                    reason: GapReason::ConnectionClosed {
-                        error: "broken pipe".into()
-                    },
-                },
-                disconnect("connection closed due to error: broken pipe"),
-            ]
-        );
-    }
-
-    #[test]
-    fn token_changes_while_subscribing_are_reconciled_when_streaming() {
-        let mut h = Harness::new().subscribing();
-        assert_eq!(h.assign(tokens([5, 6])), vec![]);
-        assert_eq!(
-            h.remove(tokens([1])),
-            vec![ConnectionAction::CloseGaps {
-                tokens: tokens([1]),
-                end: h.wall(),
-                reason: GapReason::Unsubscribed,
-            }]
-        );
-
-        let actions = h.socket(SocketEvent::SubscribeSent);
-        assert_eq!(
-            actions,
-            vec![
+            actions[4..],
+            [
                 ConnectionAction::SendSubscribe {
                     tokens: tokens([5, 6]),
                 },
@@ -1057,16 +795,16 @@ mod tests {
     }
 
     #[test]
-    fn token_removed_and_readded_while_subscribing_needs_no_change() {
-        let mut h = Harness::new().subscribing();
+    fn token_removed_and_readded_while_connecting_needs_no_change() {
+        let mut h = Harness::new();
         h.remove(tokens([1]));
         h.assign(tokens([1]));
-        assert_eq!(h.socket(SocketEvent::SubscribeSent), vec![]);
+        assert_eq!(h.socket(SocketEvent::Opened).len(), 4);
     }
 
     #[test]
-    fn all_tokens_removed_while_subscribing_closes() {
-        let mut h = Harness::new().subscribing();
+    fn all_tokens_removed_while_connecting_closes_without_disconnect() {
+        let mut h = Harness::new();
         let actions = h.remove(tokens(1..=4));
 
         assert_eq!(h.state(), ConnectionState::Closed);
@@ -1079,18 +817,17 @@ mod tests {
                     reason: GapReason::Unsubscribed,
                 },
                 ConnectionAction::CloseSocket,
-                disconnect("no tokens"),
             ]
         );
     }
 
     #[test]
-    fn unexpected_socket_events_while_subscribing_are_ignored() {
-        let mut h = Harness::new().subscribing();
-        let at = h.mono();
-        assert_eq!(h.socket(SocketEvent::Opened), vec![]);
-        assert_eq!(h.socket(SocketEvent::PongReceived { at }), vec![]);
-        assert!(matches!(h.state(), ConnectionState::Subscribing { .. }));
+    fn socket_closed_while_connecting_backs_off() {
+        let mut h = Harness::new();
+        h.socket(SocketEvent::Closed {
+            reason: "reset".into(),
+        });
+        assert!(matches!(h.state(), ConnectionState::Backoff { .. }));
     }
 
     // Streaming
@@ -1122,24 +859,12 @@ mod tests {
     }
 
     #[test]
-    fn heartbeat_pings_every_interval() {
+    fn timed_out_socket_is_a_heartbeat_gap() {
         let mut h = Harness::new().streaming();
-        assert_eq!(h.tick_after(millis(9_900)), vec![]);
-        assert_eq!(h.tick_after(millis(100)), vec![ConnectionAction::SendPing]);
-        assert_eq!(h.tick(), vec![]);
-        assert_eq!(h.tick_after(millis(9_900)), vec![]);
-        assert_eq!(h.tick_after(millis(100)), vec![ConnectionAction::SendPing]);
-    }
+        let actions = h.socket(SocketEvent::TimedOut {
+            error: "no frame for 30s".into(),
+        });
 
-    #[test]
-    fn heartbeat_dead_at_exactly_the_timeout() {
-        let mut h = Harness::new().streaming();
-        assert_eq!(h.tick_after(secs(10)), vec![ConnectionAction::SendPing]);
-        assert_eq!(h.tick_after(secs(10)), vec![ConnectionAction::SendPing]);
-        assert_eq!(h.tick_after(millis(9_900)), vec![]);
-        assert!(matches!(h.state(), ConnectionState::Streaming { .. }));
-
-        let actions = h.tick_after(millis(100));
         assert!(matches!(h.state(), ConnectionState::Backoff { .. }));
         assert_eq!(
             actions,
@@ -1156,43 +881,26 @@ mod tests {
     }
 
     #[test]
-    fn regular_pongs_keep_the_connection_alive() {
+    fn send_failure_backs_off_and_disconnects() {
         let mut h = Harness::new().streaming();
-        for _ in 0..30 {
-            assert_eq!(h.tick_after(secs(10)), vec![ConnectionAction::SendPing]);
-            h.pong();
-        }
-        assert!(matches!(h.state(), ConnectionState::Streaming { .. }));
-        assert_eq!(h.conn.last_pong_at(), Some(h.mono()));
-    }
-
-    #[test]
-    fn data_messages_are_not_liveness() {
-        let mut h = Harness::new().streaming();
-        for _ in 0..29 {
-            h.advance(secs(1));
-            let at = h.wall();
-            h.send(ConnectionEvent::Tick {
-                last_message_at: Some(at),
-            });
-        }
-        assert!(matches!(h.state(), ConnectionState::Streaming { .. }));
-
-        h.advance(secs(1));
-        let at = h.wall();
-        h.send(ConnectionEvent::Tick {
-            last_message_at: Some(at),
+        let actions = h.socket(SocketEvent::SendFailed {
+            error: "connection is closed".into(),
         });
+
         assert!(matches!(h.state(), ConnectionState::Backoff { .. }));
+        assert!(h.conn.subscribed_tokens().is_empty());
+        assert_eq!(
+            actions.last(),
+            Some(&disconnect(
+                "connection closed due to error: connection is closed"
+            ))
+        );
     }
 
     #[test]
-    fn wall_clock_jump_does_not_affect_heartbeat() {
+    fn streaming_needs_no_ticks() {
         let mut h = Harness::new().streaming();
-        h.start_wall -= TimeDelta::hours(1);
-        assert_eq!(h.tick_after(secs(10)), vec![ConnectionAction::SendPing]);
-        h.pong();
-        assert_eq!(h.tick_after(secs(29)), vec![ConnectionAction::SendPing]);
+        assert_eq!(h.tick_after(Duration::from_hours(1)), vec![]);
         assert!(matches!(h.state(), ConnectionState::Streaming { .. }));
     }
 
@@ -1228,14 +936,6 @@ mod tests {
     fn already_assigned_tokens_while_streaming_do_nothing() {
         let mut h = Harness::new().streaming();
         assert_eq!(h.assign(tokens([1, 2])), vec![]);
-    }
-
-    #[test]
-    fn live_subscribe_completion_is_ignored() {
-        let mut h = Harness::new().streaming();
-        h.assign(tokens([5]));
-        assert_eq!(h.socket(SocketEvent::SubscribeSent), vec![]);
-        assert!(matches!(h.state(), ConnectionState::Streaming { .. }));
     }
 
     #[test]
@@ -1334,14 +1034,10 @@ mod tests {
             vec![ConnectionAction::OpenSocket {
                 url: h.cfg.websocket_url.clone(),
                 attempt_id: attempt(2),
+                tokens: tokens(1..=4),
             }]
         );
-        assert_eq!(
-            h.state(),
-            ConnectionState::Connecting {
-                started_at: h.mono()
-            }
-        );
+        assert_eq!(h.state(), ConnectionState::Connecting);
         assert_eq!(h.conn.attempt_id(), Some(&attempt(2)));
     }
 
@@ -1351,11 +1047,12 @@ mod tests {
         assert_eq!(h.assign(tokens([5])), vec![]);
         assert!(matches!(h.state(), ConnectionState::Backoff { .. }));
 
-        h.reconnect();
+        let actions = h.reconnect();
+        assert!(matches!(
+            &actions[0],
+            ConnectionAction::OpenSocket { tokens: t, .. } if *t == tokens(1..=5)
+        ));
         let actions = h.socket(SocketEvent::Opened);
-        assert!(actions.contains(&ConnectionAction::SendSubscribe {
-            tokens: tokens(1..=5)
-        }));
         assert!(actions.contains(&ConnectionAction::RequestSnapshot {
             tokens: tokens(1..=5),
             reason: SnapshotReason::Subscribe,
@@ -1377,11 +1074,11 @@ mod tests {
             }]
         );
 
-        h.reconnect();
-        let actions = h.socket(SocketEvent::Opened);
-        assert!(actions.contains(&ConnectionAction::SendSubscribe {
-            tokens: tokens(2..=4)
-        }));
+        let actions = h.reconnect();
+        assert!(matches!(
+            &actions[0],
+            ConnectionAction::OpenSocket { tokens: t, .. } if *t == tokens(2..=4)
+        ));
     }
 
     #[test]
@@ -1404,9 +1101,7 @@ mod tests {
     fn backoff_doubles_on_repeated_failures() {
         let mut h = Harness::new();
         for expected in [1, 2, 4, 8, 16] {
-            h.socket(SocketEvent::Failed {
-                error: "refused".into(),
-            });
+            h.socket(refused());
             assert_eq!(h.backoff_wait(), secs(expected));
             h.reconnect();
         }
@@ -1416,14 +1111,10 @@ mod tests {
     fn backoff_is_capped() {
         let mut h = Harness::new();
         for _ in 0..10 {
-            h.socket(SocketEvent::Failed {
-                error: "refused".into(),
-            });
+            h.socket(refused());
             h.reconnect();
         }
-        h.socket(SocketEvent::Failed {
-            error: "refused".into(),
-        });
+        h.socket(refused());
         assert_eq!(h.backoff_wait(), secs(60));
     }
 
@@ -1431,14 +1122,11 @@ mod tests {
     fn wait_after_streaming_for(d: Duration) -> Duration {
         let mut h = Harness::new();
         for _ in 0..3 {
-            h.socket(SocketEvent::Failed {
-                error: "refused".into(),
-            });
+            h.socket(refused());
             h.reconnect();
         }
         h.socket(SocketEvent::Opened);
-        h.socket(SocketEvent::SubscribeSent);
-        h.stream_for(d);
+        h.advance(d);
         h.socket(SocketEvent::Closed {
             reason: "eof".into(),
         });
@@ -1473,21 +1161,6 @@ mod tests {
         assert_eq!(
             actions,
             vec![ConnectionAction::CloseSocket, close_gaps_on_shutdown(&h)]
-        );
-    }
-
-    #[test]
-    fn shutdown_while_subscribing() {
-        let mut h = Harness::new().subscribing();
-        let actions = h.send(ConnectionEvent::Shutdown);
-        assert_eq!(h.state(), ConnectionState::Closed);
-        assert_eq!(
-            actions,
-            vec![
-                ConnectionAction::CloseSocket,
-                disconnect("shutdown"),
-                close_gaps_on_shutdown(&h),
-            ]
         );
     }
 
@@ -1556,11 +1229,12 @@ mod tests {
         h.reconnect();
         for event in [
             SocketEvent::Opened,
-            SocketEvent::Failed {
-                error: "refused".into(),
-            },
+            refused(),
             SocketEvent::Closed {
                 reason: "eof".into(),
+            },
+            SocketEvent::TimedOut {
+                error: "idle".into(),
             },
             SocketEvent::SendFailed {
                 error: "broken pipe".into(),
@@ -1568,7 +1242,7 @@ mod tests {
             SocketEvent::QueueOverflow,
         ] {
             assert_eq!(h.socket_from(1, event), vec![]);
-            assert!(matches!(h.state(), ConnectionState::Connecting { .. }));
+            assert_eq!(h.state(), ConnectionState::Connecting);
         }
     }
 
@@ -1577,7 +1251,6 @@ mod tests {
         let mut h = Harness::new().backoff();
         h.reconnect();
         h.socket(SocketEvent::Opened);
-        h.socket(SocketEvent::SubscribeSent);
 
         let failures = h.conn.failures;
         assert_eq!(
@@ -1603,21 +1276,6 @@ mod tests {
     }
 
     #[test]
-    fn stale_pong_does_not_extend_the_heartbeat() {
-        let mut h = Harness::new().backoff();
-        h.reconnect();
-        h.socket(SocketEvent::Opened);
-        h.socket(SocketEvent::SubscribeSent);
-
-        h.tick_after(secs(10));
-        let at = h.mono();
-        assert_eq!(h.socket_from(1, SocketEvent::PongReceived { at }), vec![]);
-        h.tick_after(secs(10));
-        h.tick_after(secs(10));
-        assert!(matches!(h.state(), ConnectionState::Backoff { .. }));
-    }
-
-    #[test]
     fn events_from_the_socket_just_closed_do_not_back_off_twice() {
         let mut h = Harness::new().streaming();
         h.socket(SocketEvent::QueueOverflow);
@@ -1640,7 +1298,7 @@ mod tests {
     fn event_from_a_future_attempt_is_ignored() {
         let mut h = Harness::new();
         assert_eq!(h.socket_from(7, SocketEvent::Opened), vec![]);
-        assert!(matches!(h.state(), ConnectionState::Connecting { .. }));
+        assert_eq!(h.state(), ConnectionState::Connecting);
     }
 
     // Invariants over random event sequences
@@ -1712,24 +1370,23 @@ mod tests {
             attempt_id: attempt_id.clone(),
             event,
         };
-        match rng.below(12) {
+        match rng.below(11) {
             0..=2 => ConnectionEvent::Tick {
                 last_message_at: (rng.below(2) == 0).then(|| h.wall()),
             },
             3 => socket(SocketEvent::Opened),
-            4 => socket(SocketEvent::Failed {
-                error: "refused".into(),
-            }),
+            4 => socket(refused()),
             5 => socket(SocketEvent::Closed {
                 reason: "eof".into(),
             }),
-            6 => socket(SocketEvent::SendFailed {
+            6 => socket(SocketEvent::TimedOut {
+                error: "idle".into(),
+            }),
+            7 => socket(SocketEvent::SendFailed {
                 error: "broken pipe".into(),
             }),
-            7 => socket(SocketEvent::SubscribeSent),
-            8 => socket(SocketEvent::PongReceived { at: h.mono() }),
-            9 => socket(SocketEvent::QueueOverflow),
-            10 => ConnectionEvent::TokensAssigned {
+            8 => socket(SocketEvent::QueueOverflow),
+            9 => ConnectionEvent::TokensAssigned {
                 tokens: rng.tokens(),
             },
             _ => ConnectionEvent::TokensRemoved {
@@ -1740,9 +1397,9 @@ mod tests {
 
     #[test]
     fn random_event_sequences_keep_the_control_stream_consistent() {
-        // Steps taken in Connecting, Subscribing, Streaming and Backoff, to show the sequences
-        // actually exercise every state.
-        let mut visited = [0u32; 4];
+        // Steps taken in Connecting, Streaming and Backoff, to show the sequences actually
+        // exercise every state.
+        let mut visited = [0u32; 3];
         for seed in 0..200 {
             let mut rng = Lcg(seed);
             let mut h = Harness::with_tokens(tokens(1..=6));
@@ -1759,17 +1416,13 @@ mod tests {
                 ledger.apply(&actions, &assigned_before);
 
                 match h.state() {
-                    ConnectionState::Connecting { .. } => {
-                        visited[0] += 1;
-                        assert!(h.conn.subscribed_tokens().is_empty());
-                    }
-                    ConnectionState::Subscribing { .. } => visited[1] += 1,
+                    ConnectionState::Connecting => visited[0] += 1,
                     ConnectionState::Streaming { .. } => {
-                        visited[2] += 1;
+                        visited[1] += 1;
                         assert_eq!(h.conn.subscribed_tokens(), h.conn.assigned_tokens());
                     }
                     ConnectionState::Backoff { .. } => {
-                        visited[3] += 1;
+                        visited[2] += 1;
                         assert!(h.conn.subscribed_tokens().is_empty());
                     }
                     ConnectionState::Closed => assert!(h.conn.subscribed_tokens().is_empty()),

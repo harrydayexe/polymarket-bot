@@ -6,8 +6,9 @@ use std::{
 
 use anyhow::Result;
 use marcasite::types::TokenId;
-use marcasite_core::ws::WsSender;
-use serde::Serialize;
+use marcasite::ws::{
+    MarketChannel, MarketChannelHandle, MarketSubscription, MarketSubscriptionUpdate,
+};
 use tokio::{sync::mpsc, time::Instant};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -29,18 +30,15 @@ use crate::{
     types::RandomSource,
 };
 
-/// The heartbeat frame sent to the server, which answers `PONG`.
-const PING: &str = "PING";
-
 /// How long shutdown waits for the socket tasks to finish closing and hand on their last
-/// frames. The socket driver bounds the close handshake to 2 s.
+/// frames. The market channel bounds the close handshake to 2 s.
 const SOCKET_CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The socket of a connection's current attempt.
 struct Socket {
     attempt_id: ConnAttemptId,
-    /// Set once the socket has opened.
-    sender: Option<WsSender>,
+    /// Set once the channel has opened.
+    handle: Option<MarketChannelHandle>,
     cancel: CancellationToken,
     last_message_at: LastMessageAt,
 }
@@ -109,8 +107,7 @@ impl<R: RandomSource> ConnectionManager<R> {
                 self.dispatch(&slot, ConnectionEvent::TokensAssigned { tokens })
                     .await?;
             } else {
-                let (connection, actions) =
-                    Connection::new(slot.clone(), tokens, self.now(), &self.config);
+                let (connection, actions) = Connection::new(slot.clone(), tokens, &self.config);
                 tracing::info!(%slot, tokens = connection.assigned_tokens().len(), "opening connection");
                 self.connections.insert(slot.clone(), connection);
                 self.drive(&slot, actions, VecDeque::new()).await?;
@@ -133,14 +130,14 @@ impl<R: RandomSource> ConnectionManager<R> {
             kind,
         } = report;
         let event = match kind {
-            ReportKind::Opened(sender) => match self.sockets.get_mut(&slot) {
+            ReportKind::Opened(handle) => match self.sockets.get_mut(&slot) {
                 Some(socket) if socket.attempt_id == attempt_id => {
-                    socket.sender = Some(sender);
+                    socket.handle = Some(handle);
                     SocketEvent::Opened
                 }
                 // Opened after the connection gave up on it.
                 _ => {
-                    sender.close();
+                    handle.close();
                     return Ok(());
                 }
             },
@@ -161,7 +158,7 @@ impl<R: RandomSource> ConnectionManager<R> {
         Ok(())
     }
 
-    /// Runs every connection's timers: connect and subscribe timeouts, heartbeats, backoff.
+    /// Runs every connection's timers, which end backoff waits.
     ///
     /// # Errors
     ///
@@ -220,8 +217,8 @@ impl<R: RandomSource> ConnectionManager<R> {
         self.drive(slot, vec![], VecDeque::from([event])).await
     }
 
-    /// Carries out `actions`, then steps the connection with each event that results (the
-    /// outcome of a send), until none are left.
+    /// Carries out `actions`, then steps the connection with each event that results (a failed
+    /// send), until none are left.
     async fn drive(
         &mut self,
         slot: &ConnSlotId,
@@ -260,8 +257,12 @@ impl<R: RandomSource> ConnectionManager<R> {
             .get(slot)
             .and_then(|c| c.attempt_id().cloned());
         match action {
-            ConnectionAction::OpenSocket { url, attempt_id } => {
-                self.open_socket(slot, url, attempt_id);
+            ConnectionAction::OpenSocket {
+                url,
+                attempt_id,
+                tokens,
+            } => {
+                self.open_socket(slot, url, attempt_id, &tokens);
                 Ok(None)
             }
             ConnectionAction::CloseSocket => {
@@ -271,25 +272,13 @@ impl<R: RandomSource> ConnectionManager<R> {
                 Ok(None)
             }
             ConnectionAction::SendSubscribe { tokens } => {
-                // The first subscribe of an attempt is the initial subscription message.
-                let initial = matches!(
-                    self.connections.get(slot).map(Connection::state),
-                    Some(ConnectionState::Subscribing { .. })
-                );
-                let text = if initial {
-                    subscription_json(&tokens)
-                } else {
-                    update_json("subscribe", &tokens)
-                };
-                let event = self.send(slot, text).unwrap_or(SocketEvent::SubscribeSent);
-                Ok(Some(self.socket_event(slot, event)))
+                let update = MarketSubscriptionUpdate::subscribe(sorted(&tokens))
+                    .custom_feature_enabled(true);
+                Ok(self.send(slot, update))
             }
-            ConnectionAction::SendUnsubscribe { tokens } => Ok(self
-                .send(slot, update_json("unsubscribe", &tokens))
-                .map(|event| self.socket_event(slot, event))),
-            ConnectionAction::SendPing => Ok(self
-                .send(slot, PING.to_string())
-                .map(|event| self.socket_event(slot, event))),
+            ConnectionAction::SendUnsubscribe { tokens } => {
+                Ok(self.send(slot, MarketSubscriptionUpdate::unsubscribe(sorted(&tokens))))
+            }
             ConnectionAction::RequestSnapshot { tokens, reason } => {
                 if self
                     .snapshots
@@ -328,21 +317,34 @@ impl<R: RandomSource> ConnectionManager<R> {
         }
     }
 
-    fn open_socket(&mut self, slot: &ConnSlotId, url: url::Url, attempt_id: ConnAttemptId) {
+    fn open_socket(
+        &mut self,
+        slot: &ConnSlotId,
+        url: url::Url,
+        attempt_id: ConnAttemptId,
+        tokens: &HashSet<TokenId>,
+    ) {
         if let Some(old) = self.sockets.remove(slot) {
             old.cancel.cancel();
         }
         let socket = Socket {
             attempt_id: attempt_id.clone(),
-            sender: None,
+            handle: None,
             cancel: CancellationToken::new(),
             last_message_at: LastMessageAt::default(),
         };
+        // The channel sends `PING` every heartbeat interval and ends the stream with a timeout
+        // if nothing, not even the `PONG`, arrives within the heartbeat timeout.
+        let channel = MarketChannel::builder()
+            .url(url.as_str())
+            .connect_timeout(self.config.connect_timeout)
+            .heartbeat_interval(self.config.heartbeat_interval)
+            .idle_timeout(self.config.heartbeat_timeout);
         let task = SocketTask {
             slot: slot.clone(),
             attempt_id,
-            url,
-            connect_timeout: self.config.connect_timeout,
+            channel,
+            subscription: MarketSubscription::new(sorted(tokens)).custom_feature_enabled(true),
             write_queue: self.write_queue.clone(),
             reports: self.reports.clone(),
             last_message_at: socket.last_message_at.clone(),
@@ -353,23 +355,20 @@ impl<R: RandomSource> ConnectionManager<R> {
         self.sockets.insert(slot.clone(), socket);
     }
 
-    /// Queues `text` on `slot`'s socket.
+    /// Sends a subscription change on `slot`'s channel.
     ///
     /// # Returns
     ///
-    /// `SendFailed` if it could not be queued.
-    fn send(&self, slot: &ConnSlotId, text: String) -> Option<SocketEvent> {
-        let Some(sender) = self.sockets.get(slot).and_then(|s| s.sender.as_ref()) else {
-            return Some(SocketEvent::SendFailed {
-                error: "socket not open".into(),
-            });
+    /// A `SendFailed` event if it could not be sent.
+    fn send(&self, slot: &ConnSlotId, update: MarketSubscriptionUpdate) -> Option<ConnectionEvent> {
+        let sent = match self.sockets.get(slot).and_then(|s| s.handle.as_ref()) {
+            Some(handle) => handle
+                .update_subscription(update)
+                .map_err(|e| e.to_string()),
+            None => Err("channel not open".to_string()),
         };
-        sender
-            .send_text(text)
-            .err()
-            .map(|e| SocketEvent::SendFailed {
-                error: e.to_string(),
-            })
+        sent.err()
+            .map(|error| self.socket_event(slot, SocketEvent::SendFailed { error }))
     }
 
     /// `event` as reported by the current attempt of `slot`'s connection.
@@ -419,66 +418,8 @@ fn log_control(body: &ControlBody) {
 }
 
 /// Token IDs in a stable order, so the same set always gives the same message.
-fn sorted(tokens: &HashSet<TokenId>) -> Vec<&str> {
-    let mut ids: Vec<&str> = tokens.iter().map(AsRef::as_ref).collect();
+fn sorted(tokens: &HashSet<TokenId>) -> Vec<TokenId> {
+    let mut ids: Vec<TokenId> = tokens.iter().cloned().collect();
     ids.sort_unstable();
     ids
-}
-
-/// The subscription message sent once a socket opens.
-fn subscription_json(tokens: &HashSet<TokenId>) -> String {
-    #[derive(Serialize)]
-    struct Wire<'a> {
-        assets_ids: Vec<&'a str>,
-        #[serde(rename = "type")]
-        kind: &'static str,
-        custom_feature_enabled: bool,
-    }
-    serde_json::to_string(&Wire {
-        assets_ids: sorted(tokens),
-        kind: "market",
-        custom_feature_enabled: true,
-    })
-    .expect("subscription serialises")
-}
-
-/// A live subscribe or unsubscribe on an open socket.
-fn update_json(operation: &'static str, tokens: &HashSet<TokenId>) -> String {
-    #[derive(Serialize)]
-    struct Wire<'a> {
-        operation: &'static str,
-        assets_ids: Vec<&'a str>,
-        custom_feature_enabled: bool,
-    }
-    serde_json::to_string(&Wire {
-        operation,
-        assets_ids: sorted(tokens),
-        custom_feature_enabled: true,
-    })
-    .expect("subscription update serialises")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn tokens(ids: &[&str]) -> HashSet<TokenId> {
-        ids.iter().map(|t| TokenId::new(*t)).collect()
-    }
-
-    #[test]
-    fn subscription_messages_match_the_market_channel_format() {
-        assert_eq!(
-            subscription_json(&tokens(&["2", "1"])),
-            r#"{"assets_ids":["1","2"],"type":"market","custom_feature_enabled":true}"#
-        );
-        assert_eq!(
-            update_json("subscribe", &tokens(&["3"])),
-            r#"{"operation":"subscribe","assets_ids":["3"],"custom_feature_enabled":true}"#
-        );
-        assert_eq!(
-            update_json("unsubscribe", &tokens(&["4", "3"])),
-            r#"{"operation":"unsubscribe","assets_ids":["3","4"],"custom_feature_enabled":true}"#
-        );
-    }
 }

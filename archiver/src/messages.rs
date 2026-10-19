@@ -1,7 +1,10 @@
 use std::{collections::HashSet, fmt::Display};
 
 use chrono::{DateTime, Utc};
-use marcasite::types::{ConditionId, TokenId};
+use marcasite::{
+    types::{ConditionId, TokenId},
+    ws::MarketEvent,
+};
 
 use crate::{
     connection_manager::types::{ConnAttemptId, ConnSlotId},
@@ -39,11 +42,13 @@ pub enum SnapshotMsg {
 
 #[derive(Debug)]
 pub enum Record {
-    /// One websocket text frame, exactly as received.
+    /// One market channel message, as decoded by marcasite. A frame holding an array is one
+    /// record per element; a message marcasite does not recognise is kept as raw JSON
+    /// (`MarketEvent::Unknown`).
     WsFrame {
         recv_ts: DateTime<Utc>,
         conn_id: ConnAttemptId,
-        raw: String,
+        event: MarketEvent,
     },
     Market {
         recv_ts: DateTime<Utc>,
@@ -110,6 +115,11 @@ pub enum ControlBody {
     TokenUnhealthy {
         token: TokenId,
         since: DateTime<Utc>,
+    },
+    /// A recognised message that did not match its documented schema, so it is not in the
+    /// archive. `error` quotes the start of it.
+    FrameDecodeFailed {
+        error: String,
     },
 }
 

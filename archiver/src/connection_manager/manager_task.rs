@@ -80,7 +80,10 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use chrono::{DateTime, Utc};
-    use marcasite::types::{ConditionId, TokenId};
+    use marcasite::{
+        types::{ConditionId, TokenId},
+        ws::MarketEvent,
+    };
     use serde_json::{Value, json};
     use tokio::task::JoinHandle;
 
@@ -228,13 +231,13 @@ mod tests {
         }
 
         /// The next frame record, failing on anything else.
-        async fn frame(&mut self) -> (ConnAttemptId, String, DateTime<Utc>) {
+        async fn frame(&mut self) -> (ConnAttemptId, MarketEvent, DateTime<Utc>) {
             match self.record().await {
                 Record::WsFrame {
                     conn_id,
-                    raw,
+                    event,
                     recv_ts,
-                } => (conn_id, raw, recv_ts),
+                } => (conn_id, event, recv_ts),
                 other => panic!("expected a frame, got {other:?}"),
             }
         }
@@ -320,25 +323,41 @@ mod tests {
             }
         );
 
-        let frames = [
-            r#"[{"event_type":"book","asset_id":"1-yes"}]"#,
-            r#"{"event_type":"price_change",  "extra": 1}"#,
-            "not json at all",
-        ];
-        for f in frames {
-            conn.send(f);
-        }
-        for f in frames {
-            let (conn_id, raw, _) = h.frame().await;
+        conn.send(
+            r#"{"event_type":"book","asset_id":"1-yes","market":"0x01","timestamp":"1757908892351",
+                "hash":"h1","bids":[{"price":"0.48","size":"30"}],"asks":[]}"#,
+        );
+        // An array frame is one record per element; unrecognised messages are kept as JSON.
+        conn.send(r#"[{"event_type":"brand_new"},{"event_type":"brand_new","n":2}]"#);
+        conn.send("not json at all");
+
+        let (conn_id, event, _) = h.frame().await;
+        assert_eq!(conn_id, attempt(1, 1));
+        let MarketEvent::Book(book) = event else {
+            panic!("expected a book, got {event:?}");
+        };
+        assert_eq!(
+            (book.asset_id.as_ref(), book.hash.as_str()),
+            ("1-yes", "h1")
+        );
+        for expected in [
+            json!({"event_type": "brand_new"}),
+            json!({"event_type": "brand_new", "n": 2}),
+            json!("not json at all"),
+        ] {
+            let (conn_id, event, _) = h.frame().await;
             assert_eq!(conn_id, attempt(1, 1));
-            assert_eq!(raw, f);
+            assert_eq!(event, MarketEvent::Unknown(expected));
         }
 
-        // Pings are answered, so the connection stays up over several heartbeat timeouts.
-        h.server
-            .assert_no_connection_within(Duration::from_millis(1000))
-            .await;
-        assert!(h.records.try_recv().is_err(), "unexpected record");
+        // A recognised message that does not decode is not lost silently.
+        conn.send(r#"{"event_type":"book","asset_id":"1-yes"}"#);
+        let (conn_id, body) = h.control().await;
+        assert_eq!(conn_id, Some(attempt(1, 1)));
+        assert!(
+            matches!(&body, ControlBody::FrameDecodeFailed { error } if error.contains("book")),
+            "{body:?}"
+        );
 
         h.stop().await;
         assert_eq!(
@@ -356,7 +375,7 @@ mod tests {
         let mut h = Harness::start().await;
         let conn = h.streaming(&[1]).await;
 
-        conn.send("frame");
+        conn.send(r#"{"event_type":"anything"}"#);
         let (_, _, last_message_at) = h.frame().await;
         // Let a tick copy the last message time into the connection.
         time::sleep(Duration::from_millis(250)).await;
@@ -427,31 +446,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unanswered_pings_reconnect() {
-        let mut h = Harness::start().await;
-        let conn = h.streaming(&[1]).await;
-        conn.stop_answering_pings();
-
-        let (_, body) = h.control().await;
-        assert!(
-            matches!(
-                body,
-                ControlBody::GapOpen {
-                    reason: GapReason::HeartbeatTimeout,
-                    ..
-                }
-            ),
-            "{body:?}"
-        );
-        assert!(matches!(
-            h.control().await.1,
-            ControlBody::Disconnect { .. }
-        ));
-        h.server.accept().await;
-        h.stop().await;
-    }
-
-    #[tokio::test]
     async fn refused_connections_are_one_gap() {
         let mut h = Harness::start().await;
         h.server.refuse(true);
@@ -517,7 +511,6 @@ mod tests {
             json!({
                 "operation": "unsubscribe",
                 "assets_ids": ["1-no", "1-yes"],
-                "custom_feature_enabled": true,
             })
         );
         assert_eq!(
@@ -585,7 +578,10 @@ mod tests {
         // Let the socket fill the queue while nothing reads it.
         time::sleep(Duration::from_millis(300)).await;
         for i in 0..4 {
-            assert_eq!(h.frame().await.1, format!("frame {i}"));
+            assert_eq!(
+                h.frame().await.1,
+                MarketEvent::Unknown(json!(format!("frame {i}")))
+            );
         }
         assert!(matches!(
             h.control().await.1,

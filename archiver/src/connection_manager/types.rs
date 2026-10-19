@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fmt::Display};
+use std::{collections::HashSet, fmt::Display, time::Duration};
 
 use chrono::{DateTime, Utc};
 use marcasite::types::TokenId;
@@ -22,24 +22,20 @@ impl ConnAttemptId {
     }
 }
 
-/// There is no `Closing` state as in the design doc: closing is a single step (the manager
-/// carries out `CloseSocket`), so a connection goes straight to `Closed`, which is terminal.
+/// Differs from the design doc because marcasite's market channel does part of the work:
+///
+/// - No `Subscribing` state: the subscription is sent as part of connecting, so a socket that
+///   opens is already subscribed.
+/// - No ping schedule or pong deadline: the channel sends `PING` and ends the stream when
+///   nothing arrives within the heartbeat timeout.
+/// - No connect timeout: the channel bounds the handshake and the subscription send.
+/// - No `Closing` state: closing is a single step (the manager carries out `CloseSocket`), so a
+///   connection goes straight to `Closed`, which is terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
-    Connecting {
-        started_at: Instant,
-    },
-    Subscribing {
-        since: Instant,
-    },
-    Streaming {
-        since: Instant,
-        next_ping_at: Instant,
-        pong_deadline: Instant,
-    },
-    Backoff {
-        until: Instant,
-    },
+    Connecting,
+    Streaming { since: Instant },
+    Backoff { until: Instant },
     Closed,
 }
 
@@ -52,7 +48,7 @@ pub enum ConnectionEvent {
         attempt_id: ConnAttemptId,
         event: SocketEvent,
     },
-    /// Regular timer tick (e.g. every 100ms).
+    /// Regular timer tick (e.g. every 100ms). Ends the backoff wait.
     Tick {
         /// Latest value of the socket reader's last-message time, copied in by the manager.
         last_message_at: Option<DateTime<Utc>>,
@@ -68,21 +64,21 @@ pub enum ConnectionEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SocketEvent {
+    /// The socket opened and its subscription was sent.
     Opened,
     /// The socket could not connect.
     Failed {
         error: String,
+        /// How long the server asked us to wait, if it refused the handshake with one.
+        retry_after: Option<Duration>,
     },
-    Closed {
-        reason: String,
-    },
-    SendFailed {
-        error: String,
-    },
-    SubscribeSent,
-    PongReceived {
-        at: Instant,
-    },
+    /// The socket was closed, by the server or by an error.
+    Closed { reason: String },
+    /// Nothing arrived within the heartbeat timeout, or a write stalled: the connection is
+    /// dead even if the socket looks open.
+    TimedOut { error: String },
+    /// A live subscribe or unsubscribe could not be sent.
+    SendFailed { error: String },
     /// This connection's frames were dropped
     QueueOverflow,
 }
@@ -105,9 +101,8 @@ impl Display for SocketEvent {
             SocketEvent::Opened => write!(f, "SocketOpened"),
             SocketEvent::Failed { .. } => write!(f, "SocketFailed"),
             SocketEvent::Closed { .. } => write!(f, "SocketClosed"),
+            SocketEvent::TimedOut { .. } => write!(f, "SocketTimedOut"),
             SocketEvent::SendFailed { .. } => write!(f, "SendFailed"),
-            SocketEvent::SubscribeSent => write!(f, "SubscribeSent"),
-            SocketEvent::PongReceived { .. } => write!(f, "PongReceived"),
             SocketEvent::QueueOverflow => write!(f, "QueueOverflow"),
         }
     }
@@ -115,18 +110,20 @@ impl Display for SocketEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionAction {
+    /// Open a socket subscribed to `tokens`.
     OpenSocket {
         url: url::Url,
         attempt_id: ConnAttemptId,
+        tokens: HashSet<TokenId>,
     },
     CloseSocket,
+    /// Subscribe more tokens on the open socket.
     SendSubscribe {
         tokens: HashSet<TokenId>,
     },
     SendUnsubscribe {
         tokens: HashSet<TokenId>,
     },
-    SendPing,
     RequestSnapshot {
         tokens: HashSet<TokenId>,
         reason: SnapshotReason,
