@@ -98,7 +98,7 @@ Differences from the design:
 
 ### 2.6 Connection manager (`src/connection_manager/`)
 
-Complete against sections 5.5, 5.7 (gap tracker) and 7, except `awaiting_book` (3.1).
+Complete against sections 5.5, 5.7 (gap tracker) and 7, except `awaiting_book` (3.1). Handover notes, with diagrams and the decisions made: `connection-manager.md`.
 
 - **Token assignment** (`assignment.rs`): pure. New markets go to the least-loaded slot with room for both tokens (lowest slot ID on a tie), or to a new slot. Tokens never move. A slot whose last token is removed is forgotten and its ID (`c-0001`, `c-0002`, …) never reused. `TokenChanges` are applied removals first, in condition-ID order.
 - **Gap tracker** (`gap_tracker.rs`): pure. Double opens keep the earlier start, closes without an open gap write nothing (silently, not with a warning as section 14.3 says, because connections close gaps on every resume and unsubscribe whether or not one was open), and shutdown closes anything left open. `GapClose` carries a `reason`.
