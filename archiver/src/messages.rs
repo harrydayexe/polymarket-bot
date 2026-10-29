@@ -2,6 +2,7 @@ use std::{collections::HashSet, fmt::Display};
 
 use chrono::{DateTime, Utc};
 use marcasite::{
+    clob::OrderBookSummary,
     types::{ConditionId, TokenId},
     ws::MarketEvent,
 };
@@ -38,6 +39,11 @@ pub enum SnapshotMsg {
         tokens: HashSet<TokenId>,
         reason: SnapshotReason,
     },
+    /// The tracked tokens changed. Keeps the scheduled snapshots current.
+    TokensTracked {
+        add: HashSet<TokenId>,
+        remove: HashSet<TokenId>,
+    },
 }
 
 #[derive(Debug)]
@@ -49,6 +55,14 @@ pub enum Record {
         recv_ts: DateTime<Utc>,
         conn_id: ConnAttemptId,
         event: MarketEvent,
+    },
+    /// One `POST /books` response, as decoded by marcasite. `books` has a book for each
+    /// requested token the exchange knows.
+    Snapshot {
+        recv_ts: DateTime<Utc>,
+        requested_tokens: Vec<TokenId>,
+        reason: SnapshotReason,
+        books: Vec<OrderBookSummary>,
     },
     Market {
         recv_ts: DateTime<Utc>,

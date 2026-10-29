@@ -6,6 +6,7 @@ mod config;
 mod connection_manager;
 mod market_registry;
 mod messages;
+mod snapshot_worker;
 mod types;
 
 use std::process::ExitCode;
