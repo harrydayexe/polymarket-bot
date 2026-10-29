@@ -75,6 +75,10 @@ pub struct Config {
     /// `backoff_initial`.
     #[serde(with = "humantime_serde")]
     pub backoff_reset_after: Duration,
+    /// How long a subscribed token may go without a full book before a REST snapshot is
+    /// requested for it, and that snapshot may take before the token is marked unhealthy.
+    #[serde(with = "humantime_serde")]
+    pub missing_book_timeout: Duration,
     #[serde(with = "humantime_serde")]
     pub snapshot_interval: Duration,
     pub snapshot_batch_size: usize,
@@ -108,6 +112,7 @@ impl Default for Config {
             backoff_initial: Duration::from_secs(1),
             backoff_max: Duration::from_secs(60),
             backoff_reset_after: Duration::from_mins(5),
+            missing_book_timeout: Duration::from_mins(2),
             snapshot_interval: Duration::from_mins(60),
             snapshot_batch_size: 500,
             snapshot_max_requests_per_s: 2,
@@ -165,6 +170,7 @@ impl Config {
             ("heartbeat_interval", self.heartbeat_interval),
             ("connect_timeout", self.connect_timeout),
             ("backoff_initial", self.backoff_initial),
+            ("missing_book_timeout", self.missing_book_timeout),
             ("snapshot_interval", self.snapshot_interval),
             ("flush_interval", self.flush_interval),
             ("sync_interval", self.sync_interval),

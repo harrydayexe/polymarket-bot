@@ -30,6 +30,10 @@ pub enum RegistryMsg {
 #[derive(Debug)]
 pub enum ConnectionManagerMsg {
     TokenChanges(TokenChanges),
+    /// Full books for these tokens were written (websocket `book` messages or REST snapshots).
+    BooksSeen {
+        tokens: HashSet<TokenId>,
+    },
 }
 
 /// Messages to the snapshot worker.

@@ -7,4 +7,5 @@ mod gap_tracker;
 mod manager;
 pub mod manager_task;
 mod socket;
+pub mod summary;
 pub mod types;

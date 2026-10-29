@@ -59,6 +59,11 @@ impl TokenAssignment {
         added
     }
 
+    /// Every placed token.
+    pub fn tokens(&self) -> impl Iterator<Item = &TokenId> {
+        self.token_slot.keys()
+    }
+
     /// Removes the tokens of `markets`.
     ///
     /// # Returns

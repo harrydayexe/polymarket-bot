@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use marcasite::types::TokenId;
 use marcasite::ws::{
     MarketChannel, MarketChannelHandle, MarketSubscription, MarketSubscriptionUpdate,
@@ -20,19 +21,26 @@ use crate::{
         connection::{Connection, Now, step},
         gap_tracker::GapTracker,
         socket::{LastMessageAt, ReportKind, SocketReport, SocketTask},
+        summary::{ConnectionSummary, ManagerPublisher, ManagerSummary, UnhealthyToken},
         types::{
             ConnAttemptId, ConnSlotId, ConnectionAction, ConnectionEvent, ConnectionState,
             SocketEvent,
         },
     },
     market_registry::token_changes::{MarketTokens, TokenChanges},
-    messages::{ControlBody, GapReason, Record, SnapshotMsg},
+    messages::{ControlBody, GapReason, Record, SnapshotMsg, SnapshotReason},
     types::RandomSource,
 };
 
 /// How long shutdown waits for the socket tasks to finish closing and hand on their last
 /// frames. The market channel bounds the close handshake to 2 s.
 const SOCKET_CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// A subscribed token that has had no full book yet.
+struct AwaitingBook {
+    since: DateTime<Utc>,
+    snapshot_requested_at: Option<DateTime<Utc>>,
+}
 
 /// The socket of a connection's current attempt.
 struct Socket {
@@ -58,6 +66,13 @@ pub struct ConnectionManager<R> {
     snapshots: mpsc::UnboundedSender<SnapshotMsg>,
     reports: mpsc::UnboundedSender<SocketReport>,
     socket_tasks: TaskTracker,
+    awaiting_book: HashMap<TokenId, AwaitingBook>,
+    unhealthy: BTreeMap<TokenId, DateTime<Utc>>,
+    /// Whether each connection was streaming when last published, and since when.
+    streaming_since: HashMap<ConnSlotId, (bool, DateTime<Utc>)>,
+    last_message_at: Option<DateTime<Utc>>,
+    frames_dropped: u64,
+    publisher: ManagerPublisher,
 }
 
 impl<R: RandomSource> ConnectionManager<R> {
@@ -68,6 +83,7 @@ impl<R: RandomSource> ConnectionManager<R> {
         write_queue: mpsc::Sender<Record>,
         snapshots: mpsc::UnboundedSender<SnapshotMsg>,
         reports: mpsc::UnboundedSender<SocketReport>,
+        publisher: ManagerPublisher,
     ) -> Self {
         Self {
             assignment: TokenAssignment::new(config.tokens_per_connection),
@@ -81,6 +97,12 @@ impl<R: RandomSource> ConnectionManager<R> {
             snapshots,
             reports,
             socket_tasks: TaskTracker::new(),
+            awaiting_book: HashMap::new(),
+            unhealthy: BTreeMap::new(),
+            streaming_since: HashMap::new(),
+            last_message_at: None,
+            frames_dropped: 0,
+            publisher,
         }
     }
 
@@ -100,6 +122,13 @@ impl<R: RandomSource> ConnectionManager<R> {
         };
         if self.snapshots.send(tracked).is_err() {
             anyhow::bail!("snapshot worker gone, connection manager exiting");
+        }
+
+        for market in changes.removed.values() {
+            for token in [&market.yes, &market.no] {
+                self.awaiting_book.remove(token);
+                self.unhealthy.remove(token);
+            }
         }
 
         let mut removed: Vec<_> = changes.removed.into_iter().collect();
@@ -126,7 +155,23 @@ impl<R: RandomSource> ConnectionManager<R> {
         }
 
         self.drop_closed();
+
+        let mut tracked: Vec<TokenId> = self.assignment.tokens().cloned().collect();
+        tracked.sort_unstable();
+        self.publisher
+            .tracked_tokens
+            .send_replace(Arc::new(tracked));
         Ok(())
+    }
+
+    /// Full books were written for `tokens`, so their data can be trusted.
+    pub fn books_seen(&mut self, tokens: &HashSet<TokenId>) {
+        for token in tokens {
+            self.awaiting_book.remove(token);
+            if self.unhealthy.remove(token).is_some() {
+                tracing::info!(%token, "book received, token healthy again");
+            }
+        }
     }
 
     /// Feeds a socket task's report to its connection.
@@ -155,6 +200,7 @@ impl<R: RandomSource> ConnectionManager<R> {
             ReportKind::Event(event) => event,
             ReportKind::FramesDropped(dropped) => {
                 tracing::warn!(%attempt_id, dropped, "write queue full, frames dropped");
+                self.frames_dropped += dropped;
                 return self
                     .write(
                         Some(attempt_id),
@@ -181,11 +227,109 @@ impl<R: RandomSource> ConnectionManager<R> {
                 .sockets
                 .get(&slot)
                 .and_then(|s| s.last_message_at.get());
+            self.last_message_at = self.last_message_at.max(last_message_at);
             self.dispatch(&slot, ConnectionEvent::Tick { last_message_at })
                 .await?;
         }
         self.drop_closed();
+        self.check_missing_books().await?;
+        self.publish();
         Ok(())
+    }
+
+    /// Requests a REST snapshot for tokens subscribed `missing_book_timeout` ago without a full
+    /// book, and marks them unhealthy if that does not bring one either within the same time
+    /// (section 10).
+    async fn check_missing_books(&mut self) -> Result<()> {
+        let now = self.clock.now();
+        let wait = chrono::Duration::from_std(self.config.missing_book_timeout)
+            .expect("config durations fit");
+        let mut request = HashSet::new();
+        let mut unhealthy = vec![];
+        for (token, awaiting) in &mut self.awaiting_book {
+            match awaiting.snapshot_requested_at {
+                None if awaiting.since + wait <= now => {
+                    awaiting.snapshot_requested_at = Some(now);
+                    request.insert(token.clone());
+                }
+                Some(at) if at + wait <= now => unhealthy.push((token.clone(), awaiting.since)),
+                _ => {}
+            }
+        }
+
+        if !request.is_empty() {
+            tracing::warn!(
+                tokens = request.len(),
+                "no book since subscribing, requesting snapshots"
+            );
+            self.request_snapshot(request, SnapshotReason::MissingBook)?;
+        }
+        for (token, since) in unhealthy {
+            tracing::warn!(%token, "no book from the websocket or a snapshot, token unhealthy");
+            self.awaiting_book.remove(&token);
+            self.unhealthy.insert(token.clone(), since);
+            self.write(None, ControlBody::TokenUnhealthy { token, since })
+                .await?;
+        }
+        Ok(())
+    }
+
+    fn request_snapshot(&self, tokens: HashSet<TokenId>, reason: SnapshotReason) -> Result<()> {
+        if self
+            .snapshots
+            .send(SnapshotMsg::SnapshotRequest { tokens, reason })
+            .is_err()
+        {
+            anyhow::bail!("snapshot worker gone, connection manager exiting");
+        }
+        Ok(())
+    }
+
+    /// Publishes the summary for the status file.
+    fn publish(&mut self) {
+        let now = self.clock.now();
+        let mut connections = Vec::with_capacity(self.connections.len());
+        for (slot, connection) in &self.connections {
+            let state = match connection.state() {
+                ConnectionState::Connecting => "connecting",
+                ConnectionState::Streaming { .. } => "streaming",
+                ConnectionState::Backoff { .. } => "backoff",
+                ConnectionState::Closed => continue,
+            };
+            let streaming = state == "streaming";
+            let entry = self
+                .streaming_since
+                .entry(slot.clone())
+                .or_insert((streaming, now));
+            if entry.0 != streaming {
+                *entry = (streaming, now);
+            }
+            connections.push(ConnectionSummary {
+                slot: slot.clone(),
+                state,
+                tokens: connection.assigned_tokens().len(),
+                since: entry.1,
+                last_message_at: self.sockets.get(slot).and_then(|s| s.last_message_at.get()),
+            });
+        }
+        self.streaming_since
+            .retain(|slot, _| self.connections.contains_key(slot));
+
+        self.publisher.summary.send_replace(ManagerSummary {
+            connections,
+            tokens_tracked: self.assignment.tokens().count(),
+            open_gaps: self.gaps.open_count(),
+            tokens_unhealthy: self
+                .unhealthy
+                .iter()
+                .map(|(token, since)| UnhealthyToken {
+                    token: token.clone(),
+                    since: *since,
+                })
+                .collect(),
+            frames_dropped: self.frames_dropped,
+            last_message_at: self.last_message_at,
+        });
     }
 
     /// Closes every connection, closing their gaps with reason `shutdown`, and waits a bounded
@@ -291,13 +435,7 @@ impl<R: RandomSource> ConnectionManager<R> {
                 Ok(self.send(slot, MarketSubscriptionUpdate::unsubscribe(sorted(&tokens))))
             }
             ConnectionAction::RequestSnapshot { tokens, reason } => {
-                if self
-                    .snapshots
-                    .send(SnapshotMsg::SnapshotRequest { tokens, reason })
-                    .is_err()
-                {
-                    anyhow::bail!("snapshot worker gone, connection manager exiting");
-                }
+                self.request_snapshot(tokens, reason)?;
                 Ok(None)
             }
             ConnectionAction::OpenGaps {
@@ -322,6 +460,30 @@ impl<R: RandomSource> ConnectionManager<R> {
             }
             ConnectionAction::Emit { body } => {
                 log_control(&body);
+                match &body {
+                    ControlBody::Subscribe { tokens, .. } => {
+                        let now = self.clock.now();
+                        for token in tokens {
+                            // A token already waiting keeps its time; an unhealthy one stays
+                            // so until a book arrives.
+                            if !self.unhealthy.contains_key(token) {
+                                self.awaiting_book
+                                    .entry(token.clone())
+                                    .or_insert(AwaitingBook {
+                                        since: now,
+                                        snapshot_requested_at: None,
+                                    });
+                            }
+                        }
+                    }
+                    ControlBody::Unsubscribe { tokens, .. } => {
+                        for token in tokens {
+                            self.awaiting_book.remove(token);
+                            self.unhealthy.remove(token);
+                        }
+                    }
+                    _ => {}
+                }
                 self.write(attempt_id, body).await?;
                 Ok(None)
             }

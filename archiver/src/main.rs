@@ -9,6 +9,7 @@ mod market_registry;
 mod messages;
 mod snapshot_worker;
 mod types;
+mod writer;
 
 use std::process::ExitCode;
 

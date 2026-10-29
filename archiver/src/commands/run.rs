@@ -74,6 +74,7 @@ pub async fn execute(_args: CommonArgs, token: CancellationToken) -> anyhow::Res
             conn_mgr_token,
             config,
             clock.clone(),
+            crate::connection_manager::summary::manager_channels().0,
         ),
     ));
 
