@@ -7,7 +7,9 @@ mod config;
 mod connection_manager;
 mod market_registry;
 mod messages;
+mod recovery;
 mod snapshot_worker;
+mod status;
 mod types;
 mod writer;
 
@@ -18,14 +20,17 @@ use cli::Cli;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::ConfigError;
+use crate::{
+    cli::Commands,
+    config::{Config, ConfigError},
+};
 
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     tracing_subscriber::fmt()
-        .with_max_level(cli.command.common().verbose.tracing_level_filter())
+        .with_max_level(log_level(&cli))
         .with_writer(std::io::stderr)
         .init();
 
@@ -56,4 +61,18 @@ async fn main() -> ExitCode {
             }
         },
     }
+}
+
+/// The `-v` / `-q` flags if given. Otherwise `run` logs at the config file's `log_level`, and
+/// the other commands only warnings and errors.
+fn log_level(cli: &Cli) -> tracing::level_filters::LevelFilter {
+    let common = cli.command.common();
+    if !common.verbose.is_present()
+        && let Commands::Run(_) = cli.command
+        && let Ok(config) = Config::load(&common.config)
+        && let Ok(level) = config.log_level.parse()
+    {
+        return level;
+    }
+    common.verbose.tracing_level_filter()
 }

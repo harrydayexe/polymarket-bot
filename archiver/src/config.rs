@@ -131,6 +131,18 @@ impl Default for Config {
 }
 
 impl Config {
+    /// A short fingerprint of the settings, recorded in `run_start` so later analysis can tell
+    /// whether they changed between runs. Stable for a given program version.
+    pub fn fingerprint(&self) -> String {
+        // FNV-1a over the debug form: every setting, in declaration order.
+        let hash = format!("{self:?}")
+            .bytes()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+                (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+            });
+        format!("{hash:016x}")
+    }
+
     /// Reads, parses and validates the config file at `path`.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
