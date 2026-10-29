@@ -593,6 +593,10 @@ fn log_control(body: &ControlBody) {
         ControlBody::Connect { slot, token_count } => {
             tracing::info!(%slot, tokens = token_count, "connected");
         }
+        // Expected at shutdown; anything else is worth a warning.
+        ControlBody::Disconnect { slot, reason } if reason == "shutdown" => {
+            tracing::info!(%slot, reason, "disconnected");
+        }
         ControlBody::Disconnect { slot, reason } => {
             tracing::warn!(%slot, reason, "disconnected");
         }

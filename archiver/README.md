@@ -62,7 +62,7 @@ Exit codes: 0 success, 1 error, 2 invalid arguments, 3 unhealthy (`status`), 78 
 4. Install the units in [`deploy/`](deploy): `archiver.service` (the recorder, restarted 5 s after any exit), and `archiver-daily.timer` with `archiver-daily.service` (compact and verify at 01:30 UTC; set `--since` to your first day). Install `healthcheck.sh` from cron to alert when `status` is unhealthy.
 5. Back up `parquet/` (and ideally the raw files) off the machine daily.
 
-**Sizing.** Measured live on 2026-10-29 at `min_liquidity_usd = 50000`: 946 markets (1,892 tokens) on 8 connections, about 20,000 messages a minute, roughly 20 GB a day of raw JSON before compression and 4–5 GB after. Volume scales with activity more than with market count: at `1000` (the design default) about 9,800 markets (19,700 tokens, 79 connections) qualify; the shipped `config.toml` has `2000000` (38 markets). Measure your actual growth in the first days. Raw files are never deleted yet (`raw_retention` has no effect).
+**Sizing.** Measured live on 2026-10-29 at `min_liquidity_usd = 50000`: about 950 markets (1,900 tokens) on 8 connections, about 22,000 messages a minute. That is roughly 24 GB a day of raw JSON, or about 3 GB once compressed (zstd shrinks it about 8×). The recorder used about 100 MB of memory and 4% of one CPU. Volume scales with activity more than with market count: at `1000` (the design default) about 9,800 markets (19,700 tokens, 79 connections) qualify; the shipped `config.toml` has `2000000` (38 markets). Measure your actual growth in the first days. Raw files are never deleted yet (`raw_retention` has no effect).
 
 ## Configuration
 

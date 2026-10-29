@@ -28,7 +28,7 @@ The recording path is complete and has been run against live Polymarket. `archiv
 
 ## 2. Live run (2026-10-29)
 
-A run at `min_liquidity_usd = 50000` tracked 946 markets (1,892 tokens) on 8 connections. It received a full book for every token on subscribe and about 20,000 messages a minute, with no undecodable messages. The queue's high-water mark was 1,829 of 100,000. It stopped cleanly in 2 s. Restarting after a hard kill recorded a `process_restart` gap for 1,896 tokens and renamed the 3 files left open. Compacting the recorded data balanced the accounting with nothing in `unparsed`. `verify` found 227 matching windows and no mismatches, which is early support for the first assumption in section 16: `size` in `price_change` is the new total.
+A run at `min_liquidity_usd = 50000` tracked 946 markets (1,892 tokens) on 8 connections. A 12-minute release-build soak across an hour boundary rotated and compressed the finished hour (about 8× smaller) and picked up new markets as they qualified. It ran at about 100 MB of memory and 4% of one CPU, with about 16 MB of raw JSON a minute (24 GB a day, about 3 GB compressed), and stopped on SIGTERM cleanly with no gaps. It received a full book for every token on subscribe and about 20,000 messages a minute, with no undecodable messages. The queue's high-water mark was 1,829 of 100,000. It stopped cleanly in 2 s. Restarting after a hard kill recorded a `process_restart` gap for 1,896 tokens and renamed the 3 files left open. Compacting the recorded data balanced the accounting with nothing in `unparsed`. `verify` found 227 matching windows and no mismatches, which is early support for the first assumption in section 16: `size` in `price_change` is the new total.
 
 The live run found one bug, now fixed. `/books` sends `"last_trade_price": ""` for a token that has not traded, and marcasite 0.1.3 rejects that, so every batch containing such a token failed. The snapshot worker now posts to `/books` itself and archives each book as sent (see 3).
 
@@ -49,6 +49,9 @@ Earlier differences (config key names, marcasite's channel owning heartbeats, no
 - **Status file:** no `last_pong_age_s` (marcasite handles pongs), but per-connection `since` and `last_message_at` are included, plus `durable_through`.
 - **`run` logs at `log_level`** unless `-v`/`-q` is given. Logs are plain text when not on a terminal.
 - **Exit codes:** a config error still exits 78, not 2.
+- **Panics:** release builds abort on a panic, so the supervisor restarts the process and the next start records the gap. In debug builds and tests, a panicking task stops the run like a failed one.
+- **Writers lock their `.jsonl.open` files**, and startup recovery leaves locked files alone, so a recorder starting while `archiver snapshot` runs does not disturb it.
+- **The restart gap's tokens** are the tracked tokens file (when it is the crashed run's) plus the tokens the crashed run's own `subscribe` records left subscribed.
 
 ## 4. Still to do
 
@@ -65,4 +68,4 @@ Roughly in order of value:
 
 - **Liquidity floor and categories** (design 16). At `min_liquidity_usd = 1000`, about 9,800 markets (19,700 tokens) qualify, about 10 times the 50,000 floor's count. The shipped `config.toml` has 2,000,000 (38 markets).
 - **`registry_interval`** is 5 minutes, which cannot meet the "tracked within 2 minutes" acceptance criterion; the design had 60 s.
-- **Disk and backup:** plan for several GB a day compressed at the 50,000 floor, more at lower floors.
+- **Disk and backup:** plan for about 3 GB a day compressed (24 GB raw while an hour is being written) at the 50,000 floor, more at lower floors. Raw files are never deleted yet.
