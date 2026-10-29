@@ -1,4 +1,5 @@
 mod archive;
+mod book;
 mod cli;
 mod client;
 mod clock;
@@ -12,6 +13,7 @@ mod recovery;
 mod snapshot_worker;
 mod status;
 mod types;
+mod verifier;
 mod writer;
 
 use std::{io::IsTerminal, process::ExitCode};
