@@ -49,10 +49,11 @@ pub async fn execute(args: GapsArgs) -> Result<()> {
     let config = Config::load(&args.common.config)?;
     let date = args.date.unwrap_or_else(|| Utc::now().date_naive());
 
-    // Gaps can span midnight, so read the days either side too.
+    // A gap can open days before it closes, and a crash's gap is written by the next run,
+    // possibly days later: read a week before, and everything after.
     let mut records = vec![];
     let mut bad_lines = 0;
-    for day in [date - TimeDelta::days(1), date, date + TimeDelta::days(1)] {
+    for day in control_dates(&config.archive_dir, date - TimeDelta::days(7))? {
         for path in files_for_date(&config.archive_dir, Stream::Control, day, true)? {
             for line in read_records(&path)? {
                 match line?.1 {
@@ -131,6 +132,30 @@ pub async fn execute(args: GapsArgs) -> Result<()> {
         }
     );
     Ok(())
+}
+
+/// The dates from `from` on that have a control folder, in order.
+fn control_dates(root: &std::path::Path, from: NaiveDate) -> Result<Vec<NaiveDate>> {
+    let dir = root.join(Stream::Control.dir());
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(e.into()),
+    };
+    let mut dates = vec![];
+    for entry in entries {
+        let name = entry?.file_name();
+        if let Some(date) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("date="))
+            .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+            && date >= from
+        {
+            dates.push(date);
+        }
+    }
+    dates.sort();
+    Ok(dates)
 }
 
 /// Pairs each run's `gap_open` and `gap_close` records, per token, and groups tokens that

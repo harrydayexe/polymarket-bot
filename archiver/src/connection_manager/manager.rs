@@ -130,6 +130,11 @@ impl<R: RandomSource> ConnectionManager<R> {
                 self.unhealthy.remove(token);
             }
         }
+        // New tokens are published before they are subscribed, so after a crash recovery
+        // knows about everything that may have been recorded.
+        if !changes.added.is_empty() {
+            self.publish_tracked(changes.added.values().flat_map(both));
+        }
 
         let mut removed: Vec<_> = changes.removed.into_iter().collect();
         removed.sort_by(|a, b| a.0.cmp(&b.0));
@@ -155,13 +160,18 @@ impl<R: RandomSource> ConnectionManager<R> {
         }
 
         self.drop_closed();
+        self.publish_tracked(std::iter::empty());
+        Ok(())
+    }
 
-        let mut tracked: Vec<TokenId> = self.assignment.tokens().cloned().collect();
+    /// Publishes the tracked tokens, with `extra` ones about to be added.
+    fn publish_tracked(&self, extra: impl Iterator<Item = TokenId>) {
+        let mut tracked: Vec<TokenId> = self.assignment.tokens().cloned().chain(extra).collect();
         tracked.sort_unstable();
+        tracked.dedup();
         self.publisher
             .tracked_tokens
             .send_replace(Arc::new(tracked));
-        Ok(())
     }
 
     /// Full books were written for `tokens`, so their data can be trusted.

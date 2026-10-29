@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{panic::AssertUnwindSafe, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use futures::FutureExt;
@@ -190,10 +190,15 @@ pub async fn run(
     if !tasks_done {
         tracing::warn!("tasks did not stop in time");
     }
-    // A task that is unfinished, panicked or returned an error makes the stop unclean.
-    let tasks_ok = [registry, conn_mgr, snapshots]
-        .into_iter()
-        .all(|task| matches!(task.now_or_never(), Some(Ok(true))));
+    // A task that is unfinished, panicked or returned an error makes the stop unclean. The
+    // handles can lag `tracker.wait()` slightly, so they are awaited too.
+    let mut tasks_ok = true;
+    for task in [registry, conn_mgr, snapshots] {
+        tasks_ok &= matches!(
+            timeout_at(deadline - WRITER_DRAIN_TIME, task).await,
+            Ok(Ok(true))
+        );
+    }
 
     // `run_stop` is the writer's last record; it then closes every file.
     let clean = tasks_done && tasks_ok;
@@ -233,8 +238,9 @@ pub async fn run(
     Ok(())
 }
 
-/// Run a task to completion. On error, log it and cancel `shutdown` so the rest of the
-/// process stops too.
+/// Run a task to completion. On an error or a panic, log it and cancel `shutdown` so the
+/// rest of the process stops too. (Release builds abort on a panic instead, which the process
+/// supervisor turns into a restart.)
 ///
 /// # Returns
 ///
@@ -244,10 +250,15 @@ async fn supervise(
     shutdown: CancellationToken,
     task: impl Future<Output = anyhow::Result<()>>,
 ) -> bool {
-    match task.await {
-        Ok(()) => true,
-        Err(e) => {
+    match AssertUnwindSafe(task).catch_unwind().await {
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => {
             tracing::error!(task = name, error = format!("{e:#}"), "task failed");
+            shutdown.cancel();
+            false
+        }
+        Err(_) => {
+            tracing::error!(task = name, "task panicked");
             shutdown.cancel();
             false
         }
@@ -488,6 +499,14 @@ mod tests {
             &control[2],
             ControlBody::GapClose { tokens: t, reason: GapReason::ProcessRestart, .. } if *t == tokens()
         ));
+    }
+
+    #[tokio::test]
+    async fn a_panicking_task_stops_everything() {
+        let token = CancellationToken::new();
+        let ok = supervise("test", token.clone(), async { panic!("boom") }).await;
+        assert!(!ok);
+        assert!(token.is_cancelled());
     }
 
     #[tokio::test]

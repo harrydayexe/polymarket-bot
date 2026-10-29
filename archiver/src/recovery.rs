@@ -11,6 +11,12 @@ use crate::{
     archive::layout::{
         LOCK_FILE, STATE_DIR, STATUS_FILE, TRACKED_TOKENS_FILE, done_path, open_files,
     },
+    archive::{
+        envelope::StoredBody,
+        layout::{Stream, files_for_date},
+        reader::read_records,
+    },
+    messages::ControlBody,
     status::status_file::{StatusFile, TrackedTokensFile, read_json},
     types::RunId,
 };
@@ -77,7 +83,20 @@ pub fn recover(root: &Path, now: DateTime<Utc>) -> Result<Recovery> {
     let previous = read_previous(root);
     let tokens = match &previous {
         PreviousRun::None => HashSet::new(),
-        _ => read_tracked_tokens(root),
+        PreviousRun::Status(status) if status.clean_stop => HashSet::new(),
+        // The tracked tokens file can lag the last subscribe, so the run's own subscribe
+        // records count too.
+        PreviousRun::Status(status) => {
+            let mut tokens = read_tracked_tokens(root, Some(&status.run_id));
+            tokens.extend(subscribed_tokens(
+                root,
+                &status.run_id,
+                status.started_at,
+                now,
+            ));
+            tokens
+        }
+        PreviousRun::Unreadable { .. } => read_tracked_tokens(root, None),
     };
     let restart_gap = restart_gap(&previous, tokens, now);
     let previous_run = match &previous {
@@ -87,6 +106,10 @@ pub fn recover(root: &Path, now: DateTime<Utc>) -> Result<Recovery> {
 
     let mut files_finished = 0;
     for open in open_files(root).context("could not list leftover open files")? {
+        if in_use(&open) {
+            tracing::info!(path = %open.display(), "file in use by another archiver process, left as it is");
+            continue;
+        }
         let done = done_path(&open).expect("open files end in .jsonl.open");
         std::fs::rename(&open, &done)
             .with_context(|| format!("could not rename {}", open.display()))?;
@@ -120,10 +143,20 @@ fn read_previous(root: &Path) -> PreviousRun {
     }
 }
 
-fn read_tracked_tokens(root: &Path) -> HashSet<TokenId> {
+/// Whether another process holds the writer's lock on a file (an `archiver snapshot` running
+/// now, for instance).
+fn in_use(path: &Path) -> bool {
+    File::open(path).is_ok_and(|f| matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
+}
+
+/// The tokens in the tracked tokens file, if it is `run`'s (or whoever's, when `run` is
+/// unknown).
+fn read_tracked_tokens(root: &Path, run: Option<&RunId>) -> HashSet<TokenId> {
     match read_json::<TrackedTokensFile>(&root.join(TRACKED_TOKENS_FILE)) {
-        Ok(Some(file)) => file.tokens.into_iter().collect(),
-        Ok(None) => HashSet::new(),
+        Ok(Some(file)) if run.is_none_or(|run| *run == file.run_id) => {
+            file.tokens.into_iter().collect()
+        }
+        Ok(_) => HashSet::new(),
         Err(e) => {
             tracing::warn!(
                 error = format!("{e:#}"),
@@ -132,6 +165,48 @@ fn read_tracked_tokens(root: &Path) -> HashSet<TokenId> {
             HashSet::new()
         }
     }
+}
+
+/// The tokens `run` was subscribed to when its control records end: subscribed and not since
+/// unsubscribed. Reads its control files from the date it started to `now`.
+fn subscribed_tokens(
+    root: &Path,
+    run: &RunId,
+    started_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> HashSet<TokenId> {
+    let mut tokens = HashSet::new();
+    let mut date = started_at.date_naive();
+    while date <= now.date_naive() {
+        let files = files_for_date(root, Stream::Control, date, true).unwrap_or_default();
+        for path in files {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if !(name.starts_with(&format!("{run}.")) || name.starts_with(&format!("{run}-p"))) {
+                continue;
+            }
+            let Ok(lines) = read_records(&path) else {
+                continue;
+            };
+            for (_, record) in lines.map_while(Result::ok) {
+                match record.map(|r| r.body) {
+                    Ok(StoredBody::Control(ControlBody::Subscribe { tokens: t, .. })) => {
+                        tokens.extend(t);
+                    }
+                    Ok(StoredBody::Control(ControlBody::Unsubscribe { tokens: t, .. })) => {
+                        for token in &t {
+                            tokens.remove(token);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        date = date.succ_opt().expect("a date before the end of time");
+    }
+    tokens
 }
 
 /// The `process_restart` gap for the previous run, if it did not stop cleanly: from the last
@@ -295,6 +370,75 @@ mod tests {
             "dated from the file"
         );
         assert_eq!(r.previous_run, None);
+    }
+
+    fn write_control(root: &Path, run: &str, bodies: Vec<ControlBody>) {
+        let mut writer = crate::writer::writer::Writer::new(root, RunId::new(run));
+        for body in bodies {
+            writer
+                .write(&crate::messages::Record::Control {
+                    recv_ts: at("2026-09-25T09:30:00Z"),
+                    conn_id: None,
+                    body,
+                })
+                .unwrap();
+        }
+        // Left open, as by a crash.
+        writer.flush().unwrap();
+        std::mem::forget(writer);
+    }
+
+    #[test]
+    fn tokens_come_from_the_runs_subscribe_records_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut previous = status(false, Some(at("2026-09-25T09:58:00Z")));
+        previous.run_id = RunId::new("r-new");
+        // The tracked tokens file is an earlier run's: ignored.
+        write_state(dir.path(), Some(&previous));
+        let slot = crate::connection_manager::types::ConnSlotId::new("c-0001");
+        write_control(
+            dir.path(),
+            "r-new",
+            vec![
+                ControlBody::Subscribe {
+                    slot: slot.clone(),
+                    tokens: HashSet::from([TokenId::new("7"), TokenId::new("8")]),
+                },
+                ControlBody::Unsubscribe {
+                    slot,
+                    tokens: HashSet::from([TokenId::new("8")]),
+                },
+            ],
+        );
+        let gap = recover(dir.path(), at("2026-09-25T10:05:00Z"))
+            .unwrap()
+            .restart_gap
+            .unwrap();
+        assert_eq!(gap.tokens, HashSet::from([TokenId::new("7")]));
+    }
+
+    #[test]
+    fn files_another_process_is_writing_are_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer = crate::writer::writer::Writer::new(dir.path(), RunId::new("r-live"));
+        writer
+            .write(&crate::messages::Record::Control {
+                recv_ts: at("2026-09-25T09:30:00Z"),
+                conn_id: None,
+                body: ControlBody::RunStop { clean: true },
+            })
+            .unwrap();
+        let open = dir.path().join("control/date=2026-09-25/r-live.jsonl.open");
+        assert!(open.exists());
+        let r = recover(dir.path(), at("2026-09-25T10:05:00Z")).unwrap();
+        assert_eq!(r.files_finished, 0);
+        assert!(open.exists());
+        writer.close_all().unwrap();
+        assert!(
+            dir.path()
+                .join("control/date=2026-09-25/r-live.jsonl")
+                .exists()
+        );
     }
 
     #[test]

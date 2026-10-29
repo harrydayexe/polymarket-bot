@@ -84,7 +84,13 @@ pub struct TrackedTokensFile {
 pub fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
     let tmp = path.with_extension("json.tmp");
     let text = serde_json::to_vec_pretty(value).context("could not serialise")?;
-    std::fs::write(&tmp, text).with_context(|| format!("could not write {}", tmp.display()))?;
+    let write = || -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&tmp)?;
+        std::io::Write::write_all(&mut file, &text)?;
+        // Synced before the rename, so a power cut cannot leave an empty file in its place.
+        file.sync_all()
+    };
+    write().with_context(|| format!("could not write {}", tmp.display()))?;
     std::fs::rename(&tmp, path)
         .with_context(|| format!("could not rename {} into place", tmp.display()))
 }

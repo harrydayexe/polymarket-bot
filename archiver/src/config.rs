@@ -24,6 +24,9 @@ macro_rules! bail {
     };
 }
 
+/// Longest any duration setting may be.
+const MAX_DURATION: Duration = Duration::from_hours(10 * 365 * 24);
+
 #[derive(Error, Diagnostic, Debug)]
 pub enum ConfigError {
     #[error("could not read config file {path}")]
@@ -189,6 +192,29 @@ impl Config {
         ];
         for (key, value) in non_zero_durations {
             ensure!(!value.is_zero(), "{key} must be greater than 0");
+        }
+        let all_durations = [
+            ("registry_interval", self.registry_interval),
+            ("closed_grace_period", self.closed_grace_period),
+            ("heartbeat_interval", self.heartbeat_interval),
+            ("heartbeat_timeout", self.heartbeat_timeout),
+            ("connect_timeout", self.connect_timeout),
+            ("backoff_initial", self.backoff_initial),
+            ("backoff_max", self.backoff_max),
+            ("backoff_reset_after", self.backoff_reset_after),
+            ("missing_book_timeout", self.missing_book_timeout),
+            ("snapshot_interval", self.snapshot_interval),
+            ("flush_interval", self.flush_interval),
+            ("sync_interval", self.sync_interval),
+            ("raw_retention", self.raw_retention),
+        ];
+        for (key, value) in all_durations {
+            // Keeps time arithmetic far from overflow.
+            ensure!(
+                value <= MAX_DURATION,
+                "{key} must not exceed {}",
+                format_duration(MAX_DURATION)
+            );
         }
 
         ensure!(
@@ -368,6 +394,12 @@ mod tests {
     fn negative_liquidity_is_refused() {
         let msg = validation_err("min_liquidity_usd = -1.0");
         assert!(msg.contains("min_liquidity_usd"), "{msg}");
+    }
+
+    #[test]
+    fn huge_durations_are_refused() {
+        let msg = validation_err("missing_book_timeout = \"500years\"");
+        assert!(msg.contains("missing_book_timeout"), "{msg}");
     }
 
     #[test]

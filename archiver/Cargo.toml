@@ -50,3 +50,8 @@ zstd = "0.14.3"
 tokio-tungstenite = "0.30.0"
 tokio = { version = "1.53.1", features = ["test-util"] }
 tempfile = "3.27.0"
+
+[profile.release]
+# A panic anywhere stops the process, so the supervisor restarts it and the next start
+# records the gap, rather than a task dying silently while the rest keeps running.
+panic = "abort"

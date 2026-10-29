@@ -151,16 +151,21 @@ pub fn files_for_date(
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            let compressed_copy = || PathBuf::from(format!("{}.zst", path.display())).exists();
-            if name.ends_with(ZST_SUFFIX)
-                || (name.ends_with(DONE_SUFFIX) && !compressed_copy())
-                || (include_open && name.ends_with(OPEN_SUFFIX))
-            {
+            if name.ends_with(DONE_SUFFIX) {
+                // Compressed meanwhile, possibly after this listing began.
+                let compressed = PathBuf::from(format!("{}.zst", path.display()));
+                files.push(if compressed.exists() {
+                    compressed
+                } else {
+                    path
+                });
+            } else if name.ends_with(ZST_SUFFIX) || (include_open && name.ends_with(OPEN_SUFFIX)) {
                 files.push(path);
             }
         }
     }
     files.sort();
+    files.dedup();
     Ok(files)
 }
 

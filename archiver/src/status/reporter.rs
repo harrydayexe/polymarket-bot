@@ -58,6 +58,9 @@ impl StatusReporter {
         manager: ManagerWatch,
         writer: watch::Receiver<WriterStats>,
     ) -> Self {
+        // The list the manager starts with (empty) is not written, so it never replaces the
+        // previous run's list, which recovery may still need, before anything is tracked.
+        let tracked_written = Some(manager.tracked_tokens.borrow().clone());
         Self {
             root: root.into(),
             run_id,
@@ -66,7 +69,7 @@ impl StatusReporter {
             manager,
             writer,
             samples: VecDeque::new(),
-            tracked_written: None,
+            tracked_written,
         }
     }
 
@@ -153,6 +156,14 @@ impl StatusReporter {
     /// The status written.
     pub fn write(&mut self, now: DateTime<Utc>, clean_stop: bool) -> Result<StatusFile> {
         // Tracked tokens first: recovery after a crash reads both.
+        self.write_tracked_tokens(now)?;
+        let status = self.build(now, clean_stop);
+        write_json_atomic(&self.root.join(STATUS_FILE), &status)?;
+        Ok(status)
+    }
+
+    /// Writes the tracked tokens file if the tracked set changed since it was last written.
+    pub fn write_tracked_tokens(&mut self, now: DateTime<Utc>) -> Result<()> {
         // Compared by identity rather than with `has_changed`, which stops reporting changes
         // once the connection manager has gone, at shutdown.
         let tokens = self.manager.tracked_tokens.borrow().clone();
@@ -171,14 +182,12 @@ impl StatusReporter {
             )?;
             self.tracked_written = Some(tokens);
         }
-        let status = self.build(now, clean_stop);
-        write_json_atomic(&self.root.join(STATUS_FILE), &status)?;
-        Ok(status)
+        Ok(())
     }
 }
 
-/// Rewrite the status file every [STATUS_INTERVAL] and log a summary line every minute,
-/// until `token` is cancelled.
+/// Rewrite the status file every [STATUS_INTERVAL], and the tracked tokens file as soon as the
+/// tracked set changes, and log a summary line every minute, until `token` is cancelled.
 ///
 /// # Returns
 ///
@@ -191,9 +200,17 @@ pub async fn status_task(
     let mut tick = time::interval(STATUS_INTERVAL);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut last_summary = time::Instant::now();
+    let mut tracked = reporter.manager.tracked_tokens.clone();
     loop {
         tokio::select! {
             _ = token.cancelled() => return reporter,
+            // Disabled once the connection manager has gone.
+            Ok(()) = tracked.changed() => {
+                if let Err(e) = reporter.write_tracked_tokens(clock.now()) {
+                    tracing::error!(error = format!("{e:#}"), "could not write the tracked tokens file");
+                }
+                continue;
+            }
             _ = tick.tick() => {}
         }
         match reporter.write(clock.now(), false) {
@@ -314,6 +331,20 @@ mod tests {
             .unwrap();
         assert_eq!(tracked.tokens, vec![TokenId::new("1"), TokenId::new("2")]);
         assert!(!h.dir.path().join("state/status.json.tmp").exists());
+    }
+
+    #[test]
+    fn the_initial_empty_token_list_is_not_written() {
+        let mut h = harness();
+        h.reporter.write(at("2026-09-25T14:00:00Z"), false).unwrap();
+        assert!(!h.dir.path().join(TRACKED_TOKENS_FILE).exists());
+        h.manager
+            .tracked_tokens
+            .send_replace(Arc::new(vec![TokenId::new("1")]));
+        h.reporter
+            .write_tracked_tokens(at("2026-09-25T14:00:01Z"))
+            .unwrap();
+        assert!(h.dir.path().join(TRACKED_TOKENS_FILE).exists());
     }
 
     #[test]

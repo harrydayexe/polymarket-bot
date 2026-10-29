@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use crate::{
     archive::{
         envelope::encode,
-        layout::{DONE_SUFFIX, FileKey, OPEN_SUFFIX, Stream, file_stem},
+        layout::{DONE_SUFFIX, FileKey, OPEN_SUFFIX, file_stem},
     },
     messages::Record,
     types::RunId,
@@ -213,9 +213,8 @@ impl Writer {
         };
         file.out.flush()?;
         file.file.sync_data()?;
-        if key.stream == Stream::Ws {
-            self.stats.durable_through = self.stats.durable_through.max(self.stats.last_ws_recv_ts);
-        }
+        // `durable_through` is not moved on here: the latest websocket record may be in
+        // another file, not yet synced. The next sync of every file moves it.
         let done = done_name(&file.open_path);
         std::fs::rename(&file.open_path, &done)?;
         tracing::debug!(path = %done.display(), "closed file");
@@ -241,12 +240,13 @@ fn open(root: &Path, key: &FileKey, run_id: &RunId, part: u32) -> std::io::Resul
     let dir = key.dir(root);
     std::fs::create_dir_all(&dir)?;
     let open_path = dir.join(format!("{}{OPEN_SUFFIX}", file_stem(run_id, part)));
-    let file = Arc::new(
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&open_path)?,
-    );
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&open_path)?;
+    // Held while the file is open, so another process's startup recovery leaves it alone.
+    file.try_lock()?;
+    let file = Arc::new(file);
     Ok(OutputFile {
         open_path,
         out: BufWriter::with_capacity(BUFFER_BYTES, file.clone()),
@@ -273,7 +273,7 @@ mod tests {
     use crate::{
         archive::{
             envelope::{StoredBody, StoredRecord, decode},
-            layout::files_for_date,
+            layout::{Stream, files_for_date},
         },
         connection_manager::types::ConnAttemptId,
         messages::{ControlBody, SnapshotReason},
@@ -370,9 +370,11 @@ mod tests {
         assert_eq!(closed[0].seq, 1);
         assert_eq!(
             w.stats().durable_through,
-            Some(at("2026-09-25T15:00:00Z")),
-            "closing syncs everything written so far"
+            None,
+            "the 15:00 record is not synced yet"
         );
+        w.sync_all().unwrap();
+        assert_eq!(w.stats().durable_through, Some(at("2026-09-25T15:00:00Z")));
     }
 
     #[test]
