@@ -183,7 +183,11 @@ impl Writer {
 
     /// Closes the files whose hour (or day) ended more than [ROTATION_GRACE] before `now`:
     /// flush, sync, then rename from `.jsonl.open` to `.jsonl`. Blocking.
-    pub fn rotate(&mut self, now: DateTime<Utc>) -> std::io::Result<()> {
+    ///
+    /// # Returns
+    ///
+    /// How many hourly (market data) files were closed.
+    pub fn rotate(&mut self, now: DateTime<Utc>) -> std::io::Result<usize> {
         let grace = chrono::Duration::from_std(ROTATION_GRACE).expect("small duration");
         let ended: Vec<FileKey> = self
             .files
@@ -191,10 +195,11 @@ impl Writer {
             .filter(|key| key.period_end() + grace <= now)
             .copied()
             .collect();
+        let hourly = ended.iter().filter(|key| key.stream.hourly()).count();
         for key in ended {
             self.close(&key)?;
         }
-        Ok(())
+        Ok(hourly)
     }
 
     /// Closes every file. Blocking.

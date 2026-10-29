@@ -259,7 +259,7 @@ mod tests {
     use std::{collections::HashSet, path::Path};
 
     use async_trait::async_trait;
-    use marcasite::{clob::OrderBookSummary, gamma::Market, types::ConditionId, types::TokenId};
+    use marcasite::{gamma::Market, types::ConditionId, types::TokenId};
     use serde_json::json;
 
     use super::*;
@@ -291,17 +291,16 @@ mod tests {
 
     #[async_trait]
     impl BooksClient for FakeBooks {
-        async fn fetch_books(&self, tokens: &[TokenId]) -> Result<Vec<OrderBookSummary>> {
+        async fn fetch_books(&self, tokens: &[TokenId]) -> Result<Vec<serde_json::Value>> {
             Ok(tokens
                 .iter()
                 .map(|token| {
-                    serde_json::from_value(json!({
+                    json!({
                         "market": "0x01", "asset_id": token, "timestamp": "1790934258308",
                         "hash": "abc", "bids": [{ "price": "0.48", "size": "30" }], "asks": [],
                         "min_order_size": "5", "tick_size": "0.01", "neg_risk": false,
-                        "last_trade_price": "0.5",
-                    }))
-                    .unwrap()
+                        "last_trade_price": "",
+                    })
                 })
                 .collect())
         }

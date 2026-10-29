@@ -58,8 +58,12 @@ impl FrameInspector {
                 _ => {}
             },
             Record::Snapshot { books, .. } => {
-                self.books_seen
-                    .extend(books.iter().map(|book| book.asset_id.clone()));
+                self.books_seen.extend(
+                    books
+                        .iter()
+                        .filter_map(|book| book.get("asset_id")?.as_str())
+                        .map(TokenId::new),
+                );
             }
             Record::Market { .. } | Record::Control { .. } => {}
         }
@@ -141,11 +145,10 @@ mod tests {
         let mut h = harness(4);
         h.inspector.inspect(&frame(book("1")));
         h.inspector.inspect(&frame(book("1")));
-        let summary: marcasite::clob::OrderBookSummary = serde_json::from_value(json!({
+        let summary = json!({
             "market":"0xabc","asset_id":"2","timestamp":"1","hash":"h","bids":[],"asks":[],
-            "min_order_size":"5","tick_size":"0.01","neg_risk":false,"last_trade_price":"0.5"
-        }))
-        .unwrap();
+            "min_order_size":"5","tick_size":"0.01","neg_risk":false,"last_trade_price":""
+        });
         h.inspector.inspect(&Record::Snapshot {
             recv_ts: Utc::now(),
             requested_tokens: vec!["2".into(), "9".into()],

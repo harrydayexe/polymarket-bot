@@ -1,13 +1,32 @@
 use std::{
     fs::File,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
     path::Path,
 };
 
-use crate::archive::envelope::{StoredRecord, decode};
+use crate::archive::{
+    envelope::{StoredRecord, decode},
+    layout::ZST_SUFFIX,
+};
 
 /// One line of a raw file: its record, or why it could not be read.
 pub type ReadLine = (usize, Result<StoredRecord, String>);
+
+/// The lines of a raw file, plain or zstd-compressed (by its `.jsonl.zst` name), without
+/// their newlines.
+///
+/// # Errors
+///
+/// If the file cannot be opened. Reading errors come from the iterator.
+pub fn read_lines(path: &Path) -> std::io::Result<impl Iterator<Item = std::io::Result<Vec<u8>>>> {
+    let file = File::open(path)?;
+    let input: Box<dyn Read> = if path.to_string_lossy().ends_with(ZST_SUFFIX) {
+        Box::new(zstd::Decoder::new(file)?)
+    } else {
+        Box::new(file)
+    };
+    Ok(BufReader::with_capacity(1 << 20, input).split(b'\n'))
+}
 
 /// Reads the records of one raw file, numbering lines from 1. A line that is not valid UTF-8
 /// or not a valid record (such as the final line of a file cut off by a crash) is an `Err`;
@@ -19,8 +38,7 @@ pub type ReadLine = (usize, Result<StoredRecord, String>);
 pub fn read_records(
     path: &Path,
 ) -> std::io::Result<impl Iterator<Item = std::io::Result<ReadLine>>> {
-    let reader = BufReader::new(File::open(path)?);
-    Ok(reader.split(b'\n').enumerate().filter_map(|(i, line)| {
+    Ok(read_lines(path)?.enumerate().filter_map(|(i, line)| {
         let line = match line {
             Ok(line) => line,
             Err(e) => return Some(Err(e)),
@@ -77,5 +95,14 @@ mod tests {
         assert_eq!(lines[1].1.as_ref().unwrap().seq, 2);
         assert_eq!(lines[2].0, 3);
         assert!(lines[2].1.is_err());
+
+        let zst = dir.path().join("f.jsonl.zst");
+        std::fs::write(
+            &zst,
+            zstd::encode_all(&std::fs::read(&path).unwrap()[..], 3).unwrap(),
+        )
+        .unwrap();
+        let again: Vec<ReadLine> = read_records(&zst).unwrap().map(Result::unwrap).collect();
+        assert_eq!(again, lines);
     }
 }

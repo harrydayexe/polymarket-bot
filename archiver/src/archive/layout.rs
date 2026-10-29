@@ -8,6 +8,8 @@ use crate::types::RunId;
 pub const OPEN_SUFFIX: &str = ".jsonl.open";
 /// Suffix of a finished file.
 pub const DONE_SUFFIX: &str = ".jsonl";
+/// Suffix of a finished file once compressed (market data only, see [super::compress]).
+pub const ZST_SUFFIX: &str = ".jsonl.zst";
 
 /// Folder of the state files, relative to the archive root.
 pub const STATE_DIR: &str = "state";
@@ -119,8 +121,8 @@ pub fn done_path(open: &Path) -> Option<PathBuf> {
     Some(open.with_file_name(format!("{stem}{DONE_SUFFIX}")))
 }
 
-/// Every raw file of `stream` for `date`, sorted by path. Includes `.jsonl.open` files only
-/// if `include_open`.
+/// Every raw file of `stream` for `date`, sorted by path: finished files, plain or compressed
+/// (only the compressed one when both exist), and `.jsonl.open` files only if `include_open`.
 pub fn files_for_date(
     root: &Path,
     stream: Stream,
@@ -149,7 +151,11 @@ pub fn files_for_date(
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            if name.ends_with(DONE_SUFFIX) || (include_open && name.ends_with(OPEN_SUFFIX)) {
+            let compressed_copy = || PathBuf::from(format!("{}.zst", path.display())).exists();
+            if name.ends_with(ZST_SUFFIX)
+                || (name.ends_with(DONE_SUFFIX) && !compressed_copy())
+                || (include_open && name.ends_with(OPEN_SUFFIX))
+            {
                 files.push(path);
             }
         }

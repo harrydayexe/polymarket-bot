@@ -1,7 +1,8 @@
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use anyhow::Result;
-use marcasite::{clob::OrderBookSummary, types::TokenId};
+use marcasite::types::TokenId;
+use serde_json::Value;
 use tokio::{
     sync::mpsc,
     time::{self, Instant, MissedTickBehavior},
@@ -13,7 +14,7 @@ use crate::{
     config::Config,
     messages::{Record, SnapshotMsg},
     snapshot_worker::{
-        books_client::BooksClient,
+        books_client::{BooksClient, BooksHttpError},
         worker::{Request, SnapshotWorker},
     },
 };
@@ -92,7 +93,7 @@ impl<C: BooksClient> WorkerTask<C> {
         &self,
         worker: &mut SnapshotWorker,
         request: Request,
-        fetched: Result<Vec<OrderBookSummary>>,
+        fetched: Result<Vec<Value>>,
     ) -> Result<()> {
         let recv_ts = self.clock.now();
         let Request { batch, attempt } = request;
@@ -115,8 +116,8 @@ impl<C: BooksClient> WorkerTask<C> {
             }
             Err(e) => {
                 let retry_after: Option<Duration> = e
-                    .downcast_ref::<marcasite::Error>()
-                    .and_then(marcasite::Error::retry_after);
+                    .downcast_ref::<BooksHttpError>()
+                    .and_then(|e| e.retry_after);
                 let error = format!("{e:#}");
                 tracing::warn!(
                     tokens = batch.tokens.len(),
@@ -150,11 +151,14 @@ impl<C: BooksClient> WorkerTask<C> {
 }
 
 /// Warns about requested tokens the response has no book for.
-fn log_missing(requested: &[TokenId], books: &[OrderBookSummary]) {
-    let returned: HashSet<&TokenId> = books.iter().map(|book| &book.asset_id).collect();
+fn log_missing(requested: &[TokenId], books: &[Value]) {
+    let returned: HashSet<&str> = books
+        .iter()
+        .filter_map(|book| book.get("asset_id")?.as_str())
+        .collect();
     let missing = requested
         .iter()
-        .filter(|token| !returned.contains(token))
+        .filter(|token| !returned.contains(token.as_str()))
         .count();
     if missing > 0 {
         tracing::warn!(
@@ -190,8 +194,8 @@ mod tests {
         ns.into_iter().map(token).collect()
     }
 
-    fn book(token: &TokenId) -> OrderBookSummary {
-        serde_json::from_value(json!({
+    fn book(token: &TokenId) -> Value {
+        json!({
             "market": "0x01",
             "asset_id": token,
             "timestamp": "1790934258308",
@@ -202,8 +206,7 @@ mod tests {
             "tick_size": "0.01",
             "neg_risk": false,
             "last_trade_price": "0.5",
-        }))
-        .unwrap()
+        })
     }
 
     /// A `/books` stand-in. Answers with a book per token, or fails while `failures` lasts.
@@ -230,7 +233,7 @@ mod tests {
 
     #[async_trait]
     impl BooksClient for FakeBooks {
-        async fn fetch_books(&self, tokens: &[TokenId]) -> Result<Vec<OrderBookSummary>> {
+        async fn fetch_books(&self, tokens: &[TokenId]) -> Result<Vec<Value>> {
             self.calls
                 .lock()
                 .unwrap()
@@ -312,7 +315,10 @@ mod tests {
                     books,
                     ..
                 } => {
-                    let returned: Vec<TokenId> = books.into_iter().map(|b| b.asset_id).collect();
+                    let returned: Vec<TokenId> = books
+                        .iter()
+                        .map(|b| TokenId::new(b["asset_id"].as_str().unwrap()))
+                        .collect();
                     assert_eq!(returned, requested_tokens);
                     (requested_tokens, reason)
                 }

@@ -2,7 +2,6 @@ use std::{collections::HashSet, fmt::Display};
 
 use chrono::{DateTime, Utc, serde::ts_microseconds};
 use marcasite::{
-    clob::OrderBookSummary,
     types::{ConditionId, TokenId},
     ws::MarketEvent,
 };
@@ -61,13 +60,13 @@ pub enum Record {
         conn_id: ConnAttemptId,
         event: MarketEvent,
     },
-    /// One `POST /books` response, as decoded by marcasite. `books` has a book for each
-    /// requested token the exchange knows.
+    /// One `POST /books` response. `books` has a book for each requested token the exchange
+    /// knows, each exactly as sent (see [crate::archive::snapshot_book] to read one).
     Snapshot {
         recv_ts: DateTime<Utc>,
         requested_tokens: Vec<TokenId>,
         reason: SnapshotReason,
-        books: Vec<OrderBookSummary>,
+        books: Vec<serde_json::Value>,
     },
     Market {
         recv_ts: DateTime<Utc>,

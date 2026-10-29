@@ -14,12 +14,13 @@
 //!
 //! - `ws`: `event`, the market channel message as re-encoded by marcasite (one per array
 //!   element; unrecognised messages kept as their JSON).
-//! - `snapshot`: `reason`, `requested_tokens` and `books` (marcasite's `OrderBookSummary`s).
+//! - `snapshot`: `reason`, `requested_tokens` and `books`, the `/books` response's books
+//!   exactly as sent (read one with [crate::archive::snapshot_book]).
 //! - `control`: `kind` and the fields of [ControlBody].
 //! - `market`: `change` (`added` or `updated`) and `market` ([MarketInfo]).
 
 use chrono::{DateTime, Utc, serde::ts_microseconds};
-use marcasite::{clob::OrderBookSummary, types::TokenId, ws::MarketEvent};
+use marcasite::{types::TokenId, ws::MarketEvent};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -70,7 +71,7 @@ enum Body<'a> {
     Snapshot {
         reason: &'a SnapshotReason,
         requested_tokens: &'a [TokenId],
-        books: &'a [OrderBookSummary],
+        books: &'a [serde_json::Value],
     },
     Control(&'a ControlBody),
     Market {
@@ -151,7 +152,7 @@ pub enum StoredBody {
     Snapshot {
         reason: SnapshotReason,
         requested_tokens: Vec<TokenId>,
-        books: Vec<OrderBookSummary>,
+        books: Vec<serde_json::Value>,
     },
     Control(ControlBody),
     Market {
@@ -289,12 +290,11 @@ mod tests {
 
     #[test]
     fn snapshot_round_trips() {
-        let book: OrderBookSummary = serde_json::from_value(json!({
+        let book = json!({
             "market":"0xabc","asset_id":"111","timestamp":"1790348400120","hash":"abc",
             "bids":[{"price":"0.49","size":"20"}],"asks":[{"price":"0.51","size":"5.000001"}],
-            "min_order_size":"5","tick_size":"0.01","neg_risk":false,"last_trade_price":"0.5"
-        }))
-        .unwrap();
+            "min_order_size":"5","tick_size":"0.01","neg_risk":false,"last_trade_price":""
+        });
         let record = Record::Snapshot {
             recv_ts: ts(),
             requested_tokens: vec![TokenId::new("111"), TokenId::new("222")],

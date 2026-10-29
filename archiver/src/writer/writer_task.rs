@@ -1,12 +1,22 @@
-use std::sync::Arc;
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
+use futures::FutureExt;
 use tokio::{
     sync::{mpsc, watch},
+    task::JoinHandle,
     time::{Instant, sleep_until},
 };
 
 use crate::{
+    archive::compress::compress_finished,
     clock::SharedClock,
     config::Config,
     messages::{ControlBody, Record},
@@ -18,8 +28,8 @@ use crate::{
 
 /// Write every record from the queue until a `run_stop` record has been written or every
 /// producer has gone, then close all files. Flushes every `flush_interval`, syncs every
-/// `sync_interval` and closes files once their hour or day is over. Publishes its counters on
-/// `stats` every flush.
+/// `sync_interval` and closes files once their hour or day is over, then compresses closed
+/// market data files in the background. Publishes its counters on `stats` every flush.
 ///
 /// # Errors
 ///
@@ -33,6 +43,9 @@ pub async fn writer_task(
     config: Arc<Config>,
     clock: SharedClock,
 ) -> Result<()> {
+    let mut compressor = Compressor::new(config.archive_dir.clone());
+    // Files finished by earlier runs.
+    compressor.request();
     let result = run(
         &mut writer,
         &mut queue,
@@ -40,8 +53,10 @@ pub async fn writer_task(
         &stats,
         &config,
         &clock,
+        &mut compressor,
     )
     .await;
+    compressor.stop().await;
     if let Err(e) = &result {
         tracing::error!(
             error = format!("{e:#}"),
@@ -66,6 +81,7 @@ async fn run(
     stats: &watch::Sender<WriterStats>,
     config: &Config,
     clock: &SharedClock,
+    compressor: &mut Compressor,
 ) -> Result<()> {
     let mut next_flush = Instant::now() + config.flush_interval;
     let mut next_sync = Instant::now() + config.sync_interval;
@@ -102,9 +118,13 @@ async fn run(
             writer
                 .flush()
                 .context("could not flush the archive files")?;
-            writer
+            let closed = writer
                 .rotate(clock.now())
                 .context("could not close a finished archive file")?;
+            if closed > 0 {
+                compressor.request();
+            }
+            compressor.poll();
             inspector.send_books_seen();
             publish(writer, queue, stats);
         }
@@ -118,6 +138,64 @@ async fn run(
                 .context("sync task failed")?
                 .context("could not sync the archive files to disk")?;
             writer.synced(pending);
+        }
+    }
+}
+
+/// Compresses finished market data files on a blocking thread, one sweep at a time.
+struct Compressor {
+    root: PathBuf,
+    running: Option<JoinHandle<std::io::Result<usize>>>,
+    /// Another sweep was asked for while one was running.
+    again: bool,
+    stop: Arc<AtomicBool>,
+}
+
+impl Compressor {
+    fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            running: None,
+            again: false,
+            stop: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn request(&mut self) {
+        if self.running.is_some() {
+            self.again = true;
+            return;
+        }
+        let root = self.root.clone();
+        let stop = self.stop.clone();
+        self.running = Some(tokio::task::spawn_blocking(move || {
+            compress_finished(&root, &stop)
+        }));
+    }
+
+    /// Notes a finished sweep, starting another if one was asked for.
+    fn poll(&mut self) {
+        if !self.running.as_ref().is_some_and(JoinHandle::is_finished) {
+            return;
+        }
+        let finished = self.running.take().expect("checked above");
+        match finished.now_or_never() {
+            Some(Ok(Ok(n))) if n > 0 => tracing::debug!(files = n, "compressed finished files"),
+            Some(Ok(Ok(_))) => {}
+            Some(Ok(Err(e))) => tracing::warn!(error = %e, "could not compress finished files"),
+            Some(Err(e)) => tracing::warn!(error = %e, "compression task failed"),
+            None => {}
+        }
+        if std::mem::take(&mut self.again) {
+            self.request();
+        }
+    }
+
+    /// Stops a sweep in progress, leaving its current file uncompressed.
+    async fn stop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(running) = self.running.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(2), running).await;
         }
     }
 }
@@ -136,8 +214,6 @@ fn publish(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use chrono::{DateTime, Utc};
     use serde_json::json;
 
@@ -263,15 +339,37 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(12)).await;
         h.queue.send(book(h.clock.now(), "1")).await.unwrap();
         tokio::time::sleep(Duration::from_secs(2)).await;
-        assert!(
-            h.dir
-                .path()
-                .join("raw/ws/date=2026-09-25/hour=14/r-1.jsonl")
-                .exists()
-        );
+        let hour = h.dir.path().join("raw/ws/date=2026-09-25/hour=14");
+        assert!(hour.join("r-1.jsonl").exists() || hour.join("r-1.jsonl.zst").exists());
         drop(h.queue);
         h.task.await.unwrap().unwrap();
         assert!(open_files(h.dir.path()).unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn compresses_closed_market_data_files() {
+        let h = start(16, "2026-09-25T14:59:59Z");
+        h.queue.send(book(h.clock.now(), "1")).await.unwrap();
+        let zst = h
+            .dir
+            .path()
+            .join("raw/ws/date=2026-09-25/hour=14/r-1.jsonl.zst");
+        for _ in 0..200 {
+            if zst.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            // The compression runs on a real thread.
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(zst.exists());
+        let records: Vec<_> = crate::archive::reader::read_records(&zst)
+            .unwrap()
+            .map(|l| l.unwrap().1.unwrap())
+            .collect();
+        assert_eq!(records.len(), 1);
+        drop(h.queue);
+        h.task.await.unwrap().unwrap();
     }
 
     #[tokio::test(start_paused = true)]
