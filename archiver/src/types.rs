@@ -27,12 +27,15 @@ impl RandomSource for SystemRandom {
 }
 
 // Tests: returns scripted values in order
+#[cfg(test)]
 pub struct ScriptedRandom(std::collections::VecDeque<f64>);
+#[cfg(test)]
 impl ScriptedRandom {
     pub fn new(values: impl IntoIterator<Item = f64>) -> Self {
         Self(values.into_iter().collect())
     }
 }
+#[cfg(test)]
 impl RandomSource for ScriptedRandom {
     fn unit(&mut self) -> f64 {
         self.0.pop_front().expect("ran out of scripted values")

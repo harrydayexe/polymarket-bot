@@ -54,10 +54,10 @@ pub enum Commands {
 impl Commands {
     pub fn common(&self) -> &CommonArgs {
         match self {
-            Commands::Run(args) => &args,
-            Commands::Check(args) => &args,
-            Commands::Status(args) => &args,
-            Commands::Markets(args) => &args,
+            Commands::Run(args) => args,
+            Commands::Check(args) => args,
+            Commands::Status(args) => args,
+            Commands::Markets(args) => args,
             Commands::Snapshot(args) => &args.common,
             Commands::Compact(args) => &args.common,
             Commands::Verify(args) => &args.common,

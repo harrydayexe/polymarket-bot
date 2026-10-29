@@ -91,10 +91,6 @@ impl Writer {
         }
     }
 
-    pub fn run_id(&self) -> &RunId {
-        &self.run_id
-    }
-
     pub fn stats(&self) -> &WriterStats {
         &self.stats
     }

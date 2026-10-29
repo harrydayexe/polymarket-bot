@@ -13,7 +13,7 @@ mod status;
 mod types;
 mod writer;
 
-use std::process::ExitCode;
+use std::{io::IsTerminal, process::ExitCode};
 
 use clap::Parser;
 use cli::Cli;
@@ -32,6 +32,7 @@ async fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_max_level(log_level(&cli))
         .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
         .init();
 
     // Handle cancellation via CTRL+C or SIGTERM
@@ -50,6 +51,10 @@ async fn main() -> ExitCode {
 
     match commands::dispatch(cli, token).await {
         Ok(()) => ExitCode::SUCCESS,
+        // The command has already said why.
+        Err(e) if e.downcast_ref::<commands::Exit>().is_some() => {
+            ExitCode::from(e.downcast_ref::<commands::Exit>().expect("checked").0)
+        }
         Err(e) => match e.downcast::<ConfigError>() {
             Ok(cfg_err) => {
                 eprintln!("{:?}", miette::Report::new(cfg_err));
