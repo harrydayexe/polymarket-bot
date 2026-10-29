@@ -1,0 +1,12 @@
+# Runs archiver-daily.service at 01:30 UTC (section 13 of the design).
+#   sudo cp archiver-daily.service archiver-daily.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now archiver-daily.timer
+[Unit]
+Description=Daily archiver compaction and verification
+
+[Timer]
+OnCalendar=*-*-* 01:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
