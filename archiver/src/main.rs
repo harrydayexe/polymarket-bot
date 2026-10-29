@@ -3,6 +3,7 @@ mod cli;
 mod client;
 mod clock;
 mod commands;
+mod compactor;
 mod config;
 mod connection_manager;
 mod market_registry;

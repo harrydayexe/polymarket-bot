@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
+arrow-array = "60.1.0"
+arrow-schema = "60.1.0"
 async-trait = "0.1.92"
 chrono = { version = "0.4.45", default-features = false, features = [
     "serde",
@@ -28,6 +30,7 @@ marcasite = { version = "0.1.3", default-features = false, features = [
 ] }
 marcasite-core = "0.1.3"
 miette = { version = "7.6.0", features = ["fancy"] }
+parquet = { version = "60.1.0", default-features = false, features = ["arrow", "zstd"] }
 rand = "0.10.3"
 reqwest = { version = "0.13.5", features = ["json", "query"] }
 rust_decimal = { version = "1.43.0", features = ["serde"] }
