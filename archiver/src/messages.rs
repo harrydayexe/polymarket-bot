@@ -1,11 +1,12 @@
 use std::{collections::HashSet, fmt::Display};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Utc, serde::ts_microseconds};
 use marcasite::{
     clob::OrderBookSummary,
     types::{ConditionId, TokenId},
     ws::MarketEvent,
 };
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::{
     connection_manager::types::{ConnAttemptId, ConnSlotId},
@@ -76,7 +77,11 @@ pub enum Record {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The body of a control record. Serialised with a `kind` field naming the variant
+/// (`gap_open`, `run_stop`, ...), times as microseconds since the epoch and token sets as
+/// sorted lists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ControlBody {
     RunStart {
         program_version: String,
@@ -96,23 +101,32 @@ pub enum ControlBody {
     },
     Subscribe {
         slot: ConnSlotId,
+        #[serde(serialize_with = "sorted")]
         tokens: HashSet<TokenId>,
     },
     Unsubscribe {
         slot: ConnSlotId,
+        #[serde(serialize_with = "sorted")]
         tokens: HashSet<TokenId>,
     },
     GapOpen {
+        #[serde(serialize_with = "sorted")]
         tokens: HashSet<TokenId>,
+        #[serde(with = "ts_microseconds")]
         start: DateTime<Utc>,
+        #[serde(flatten)]
         reason: GapReason,
     },
     GapClose {
+        #[serde(serialize_with = "sorted")]
         tokens: HashSet<TokenId>,
+        #[serde(with = "ts_microseconds")]
         end: DateTime<Utc>,
+        #[serde(flatten)]
         reason: GapReason,
     },
     SnapshotFailed {
+        #[serde(serialize_with = "sorted")]
         tokens: HashSet<TokenId>,
         error: String,
         attempts: u32,
@@ -128,6 +142,7 @@ pub enum ControlBody {
     },
     TokenUnhealthy {
         token: TokenId,
+        #[serde(with = "ts_microseconds")]
         since: DateTime<Utc>,
     },
     /// A recognised message that did not match its documented schema, so it is not in the
@@ -137,7 +152,15 @@ pub enum ControlBody {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Serialises a token set as a sorted list, so the same set always gives the same line.
+fn sorted<S: Serializer>(tokens: &HashSet<TokenId>, serializer: S) -> Result<S::Ok, S::Error> {
+    let mut ids: Vec<&TokenId> = tokens.iter().collect();
+    ids.sort_unstable();
+    serializer.collect_seq(ids)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SnapshotReason {
     Subscribe,
     NewToken,
@@ -146,7 +169,10 @@ pub enum SnapshotReason {
     MissingBook,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Why a gap opened or closed. Serialised as a `reason` code (`connect_failed`, `resumed`,
+/// ...) plus a `detail` with the error for the two reasons that carry one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "GapReasonRepr", try_from = "GapReasonRepr")]
 pub enum GapReason {
     ConnectFailed { error: String },
     ConnectionClosed { error: String },
@@ -157,6 +183,66 @@ pub enum GapReason {
     Shutdown,
     Unsubscribed,
     Resumed,
+}
+
+impl GapReason {
+    /// The reason's code as written to disk.
+    pub fn code(&self) -> &'static str {
+        match self {
+            GapReason::ConnectFailed { .. } => "connect_failed",
+            GapReason::ConnectionClosed { .. } => "connection_closed",
+            GapReason::HeartbeatTimeout => "heartbeat_timeout",
+            GapReason::QueueOverflow => "queue_overflow",
+            GapReason::ProcessRestart => "process_restart",
+            GapReason::WriteFailure => "write_failure",
+            GapReason::Shutdown => "shutdown",
+            GapReason::Unsubscribed => "unsubscribed",
+            GapReason::Resumed => "resumed",
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct GapReasonRepr {
+    reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+}
+
+impl From<GapReason> for GapReasonRepr {
+    fn from(reason: GapReason) -> Self {
+        let code = reason.code().to_string();
+        let detail = match reason {
+            GapReason::ConnectFailed { error } | GapReason::ConnectionClosed { error } => {
+                Some(error)
+            }
+            _ => None,
+        };
+        GapReasonRepr {
+            reason: code,
+            detail,
+        }
+    }
+}
+
+impl TryFrom<GapReasonRepr> for GapReason {
+    type Error = String;
+
+    fn try_from(repr: GapReasonRepr) -> Result<Self, Self::Error> {
+        let error = || repr.detail.clone().unwrap_or_default();
+        Ok(match repr.reason.as_str() {
+            "connect_failed" => GapReason::ConnectFailed { error: error() },
+            "connection_closed" => GapReason::ConnectionClosed { error: error() },
+            "heartbeat_timeout" => GapReason::HeartbeatTimeout,
+            "queue_overflow" => GapReason::QueueOverflow,
+            "process_restart" => GapReason::ProcessRestart,
+            "write_failure" => GapReason::WriteFailure,
+            "shutdown" => GapReason::Shutdown,
+            "unsubscribed" => GapReason::Unsubscribed,
+            "resumed" => GapReason::Resumed,
+            other => return Err(format!("unknown gap reason {other:?}")),
+        })
+    }
 }
 
 impl Display for GapReason {
