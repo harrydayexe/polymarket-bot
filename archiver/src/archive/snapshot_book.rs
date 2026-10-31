@@ -1,4 +1,5 @@
-//! Reading the books of a snapshot record, which are stored exactly as `/books` sent them.
+//! Reading the books of a snapshot record. They are read leniently from JSON rather than as
+//! marcasite's `OrderBookSummary`, so archives stay readable if that type changes.
 
 use chrono::{DateTime, Utc};
 use marcasite::types::{ConditionId, TokenId};

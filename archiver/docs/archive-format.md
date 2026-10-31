@@ -40,7 +40,7 @@ One JSON object per line. Every line starts with:
 Then, by source:
 
 - **`ws`**: `event`, one market channel message. A frame holding a JSON array is one line per element. Known message types (`book`, `price_change`, `last_trade_price`, `tick_size_change`, `best_bid_ask`, `new_market`, `market_resolved`) are re-encoded by marcasite from its typed fields: prices and sizes stay exact decimal strings and exchange timestamps stay strings, but fields marcasite does not know are dropped. Anything else is kept exactly as received. A known message that fails to decode is not here; it becomes a `frame_decode_failed` control record quoting its start.
-- **`snapshot`**: `reason` (`subscribe`, `new_token`, `scheduled`, `manual`, `missing_book`), `requested_tokens`, and `books`, the `/books` response's books exactly as sent. A requested token with no book is simply absent. Read them with `archive::snapshot_book::SnapshotBook::parse`, which allows for empty strings such as `"last_trade_price": ""`.
+- **`snapshot`**: `reason` (`subscribe`, `new_token`, `scheduled`, `manual`, `missing_book`), `requested_tokens`, and `books`, the `/books` response's books as marcasite's `OrderBookSummary`, re-encoded like websocket events. A requested token with no book is simply absent. Read them with `archive::snapshot_book::SnapshotBook::parse`, which is lenient (for example, it accepts an empty `"last_trade_price"`), so the reader keeps working if marcasite's types change.
 - **`control`**: `kind` and its fields. Times are microseconds; token lists are sorted.
 
   | `kind` | Fields |

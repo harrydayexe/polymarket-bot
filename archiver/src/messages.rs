@@ -61,7 +61,8 @@ pub enum Record {
         event: MarketEvent,
     },
     /// One `POST /books` response. `books` has a book for each requested token the exchange
-    /// knows, each exactly as sent (see [crate::archive::snapshot_book] to read one).
+    /// knows: marcasite's `OrderBookSummary` as JSON (see [crate::archive::snapshot_book] to
+    /// read one).
     Snapshot {
         recv_ts: DateTime<Utc>,
         requested_tokens: Vec<TokenId>,

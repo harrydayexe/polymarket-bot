@@ -30,14 +30,14 @@ The recording path is complete and has been run against live Polymarket. `archiv
 
 A run at `min_liquidity_usd = 50000` tracked 946 markets (1,892 tokens) on 8 connections. A 12-minute release-build soak across an hour boundary rotated and compressed the finished hour (about 8× smaller) and picked up new markets as they qualified. It ran at about 100 MB of memory and 4% of one CPU, with about 16 MB of raw JSON a minute (24 GB a day, about 3 GB compressed), and stopped on SIGTERM cleanly with no gaps. It received a full book for every token on subscribe and about 20,000 messages a minute, with no undecodable messages. The queue's high-water mark was 1,829 of 100,000. It stopped cleanly in 2 s. Restarting after a hard kill recorded a `process_restart` gap for 1,896 tokens and renamed the 3 files left open. Compacting the recorded data balanced the accounting with nothing in `unparsed`. `verify` found 227 matching windows and no mismatches, which is early support for the first assumption in section 16: `size` in `price_change` is the new total.
 
-The live run found one bug, now fixed. `/books` sends `"last_trade_price": ""` for a token that has not traded, and marcasite 0.1.3 rejects that, so every batch containing such a token failed. The snapshot worker now posts to `/books` itself and archives each book as sent (see 3).
+**Known issue, waiting on marcasite: REST snapshots mostly fail.** `/books` sends `"last_trade_price": ""` for a token that has not traded. marcasite 0.1.3 rejects that, so every batch that contains such a token fails, and live that was nearly every batch. Each failure is recorded as `snapshot_failed` and retried at the next round. The websocket's full books, which arrive for every token on subscribe, are unaffected and remain the anchors. All Polymarket access goes through marcasite, so the fix belongs there; once a release accepts the empty string, upgrade the dependency and nothing else needs to change.
 
 ## 3. Differences from the design
 
 Earlier differences (config key names, marcasite's channel owning heartbeats, no `Subscribing`/`Closing` states, registry details) are unchanged; see the previous version of this file in git history and `connection-manager.md`. New in this round:
 
 - **Websocket records hold re-encoded events, not raw text** (a consequence of marcasite's channel, see `connection-manager.md` 3.1). The field is `event`, not `raw`. One line per array element.
-- **Snapshot records hold each book exactly as sent** (`books`), the design's intent, read leniently with `archive::snapshot_book`. Retries honour `Retry-After`.
+- **Snapshot records hold marcasite's `OrderBookSummary`s as JSON** (`books`), read leniently with `archive::snapshot_book`, so the format does not depend on marcasite's types. Retries honour `Retry-After`.
 - **Finished hourly websocket and snapshot files are compressed to `.jsonl.zst`** in the background, because raw JSON runs at about 20 GB a day for ~1,900 tokens. Control and market files are not compressed. The design compressed raw files only after compaction.
 - **Files close 10 s after their hour ends**, for records stamped just before the boundary. A record arriving later still gets a new part file (`<run>-p2.jsonl`), never a reopened one.
 - **`BooksSeen` comes from the writer only**, for both websocket books and snapshot books, since it sees both after they are written. The snapshot worker does not send it.
@@ -56,6 +56,8 @@ Earlier differences (config key names, marcasite's channel owning heartbeats, no
 ## 4. Still to do
 
 Roughly in order of value:
+
+0. **Upgrade marcasite** once it accepts an empty `last_trade_price` in `/books` (see 2), so REST snapshots are recorded.
 
 1. **Raw retention** (`raw_retention` has no effect): delete raw files of compacted days after the retention period, once the compactor has been trusted for a while.
 2. **Integration scenarios against the archive on disk** (14.4). `commands::run` has three in-process end-to-end tests: a clean recording, crash recovery and the lock. Missing scenarios include a slow or full disk, an hour boundary under load, and a Gamma outage through the whole program. There are no process-level CLI tests (14.5) or soak test (14.6) beyond the live run above.

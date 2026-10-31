@@ -11,7 +11,7 @@ use crate::{
     commands::Exit,
     config::Config,
     messages::{ControlBody, Record, SnapshotReason},
-    snapshot_worker::books_client::{BooksClient, BooksHttpError, ClobBooksClient},
+    snapshot_worker::books_client::{BooksClient, ClobBooksClient},
     status::status_file::{TrackedTokensFile, read_json},
     types::{RunId, SystemRandom},
     writer::writer::Writer,
@@ -120,8 +120,8 @@ async fn fetch(client: &ClobBooksClient, batch: &[TokenId]) -> Result<Vec<serde_
             Ok(books) => return Ok(books),
             Err(e) if attempt < ATTEMPTS => {
                 let wait = Duration::from_secs(1 << (attempt - 1)).max(
-                    e.downcast_ref::<BooksHttpError>()
-                        .and_then(|e| e.retry_after)
+                    e.downcast_ref::<marcasite::Error>()
+                        .and_then(marcasite::Error::retry_after)
                         .unwrap_or_default(),
                 );
                 eprintln!("attempt {attempt} failed, retrying in {wait:?}: {e:#}");

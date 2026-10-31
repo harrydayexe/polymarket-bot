@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use futures::StreamExt;
 use marcasite::{
+    clob::ClobClient,
     types::TokenId,
     ws::{MarketChannel, MarketSubscription},
 };
@@ -110,22 +111,20 @@ async fn gamma(config: &Config) -> Result<(String, Option<TokenId>)> {
 
 /// Reaches the CLOB REST API and compares its clock with ours.
 async fn clob_time(config: &Config) -> Result<String> {
-    let url = format!("{}/time", config.clob_rest_url.trim_end_matches('/'));
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()?;
+    let client = ClobClient::builder()
+        .base_url(&config.clob_rest_url)
+        .build()
+        .context("failed to create CLOB API client")?;
     let before = Utc::now();
-    let response = client.get(&url).send().await?.error_for_status()?;
-    let text = response.text().await?;
+    let server = client
+        .get_server_time()
+        .await
+        .context("could not get the CLOB server time")?;
     let after = Utc::now();
-    let server: i64 = text
-        .trim()
-        .parse()
-        .with_context(|| format!("unexpected /time response {text:?}"))?;
     // The server sends whole seconds: compare with our clock halfway through the request,
     // allowing for the rounding.
     let ours = before + (after - before) / 2;
-    let offset = (ours.timestamp_millis() - server * 1000 - 500).abs();
+    let offset = (ours.timestamp_millis() - server.timestamp_millis() - 500).abs();
     anyhow::ensure!(
         offset <= MAX_CLOCK_OFFSET.as_millis() as i64 + 500,
         "system clock is about {:.1} s off the exchange's; check time sync (NTP)",

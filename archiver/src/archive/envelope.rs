@@ -14,8 +14,8 @@
 //!
 //! - `ws`: `event`, the market channel message as re-encoded by marcasite (one per array
 //!   element; unrecognised messages kept as their JSON).
-//! - `snapshot`: `reason`, `requested_tokens` and `books`, the `/books` response's books
-//!   exactly as sent (read one with [crate::archive::snapshot_book]).
+//! - `snapshot`: `reason`, `requested_tokens` and `books`, the `/books` response's books as
+//!   marcasite's `OrderBookSummary` (read one with [crate::archive::snapshot_book]).
 //! - `control`: `kind` and the fields of [ControlBody].
 //! - `market`: `change` (`added` or `updated`) and `market` ([MarketInfo]).
 

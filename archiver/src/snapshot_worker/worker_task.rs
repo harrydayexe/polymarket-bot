@@ -14,7 +14,7 @@ use crate::{
     config::Config,
     messages::{Record, SnapshotMsg},
     snapshot_worker::{
-        books_client::{BooksClient, BooksHttpError},
+        books_client::BooksClient,
         worker::{Request, SnapshotWorker},
     },
 };
@@ -116,8 +116,8 @@ impl<C: BooksClient> WorkerTask<C> {
             }
             Err(e) => {
                 let retry_after: Option<Duration> = e
-                    .downcast_ref::<BooksHttpError>()
-                    .and_then(|e| e.retry_after);
+                    .downcast_ref::<marcasite::Error>()
+                    .and_then(marcasite::Error::retry_after);
                 let error = format!("{e:#}");
                 tracing::warn!(
                     tokens = batch.tokens.len(),
