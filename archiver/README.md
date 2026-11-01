@@ -4,7 +4,7 @@ A Rust CLI that records Polymarket order book data. It picks the markets worth t
 
 It talks to Polymarket through the [marcasite](https://crates.io/crates/marcasite) crate.
 
-> **Status:** recording works and can be deployed. `compact` and `verify` work but are new; see [`docs/implementation-status.md`](docs/implementation-status.md). **Known issue:** REST snapshots mostly fail until marcasite accepts the empty `last_trade_price` that `/books` sends for untraded tokens; websocket books are unaffected. The on-disk format is in [`docs/archive-format.md`](docs/archive-format.md), and the original design in [`docs/design.md`](docs/design.md) (partly out of date).
+> **Status:** recording works and can be deployed. `compact` and `verify` work but are new; see [`docs/implementation-status.md`](docs/implementation-status.md). The on-disk format is in [`docs/archive-format.md`](docs/archive-format.md), and the original design in [`docs/design.md`](docs/design.md) (partly out of date).
 
 ## How it works
 

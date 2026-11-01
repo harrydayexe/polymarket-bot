@@ -46,3 +46,36 @@ impl BooksClient for ClobBooksClient {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use marcasite::clob::OrderBookSummary;
+    use serde_json::json;
+
+    use crate::archive::snapshot_book::SnapshotBook;
+
+    /// A token that has never traded, as `/books` sends it live.
+    #[test]
+    fn untraded_books_decode_and_archive_unchanged() {
+        let sent = json!({
+            "market": "0x6231ec0ba9d53a7d36c0328dfbd834e778f6e891ec6438d7d3e6f39d377c8f32",
+            "asset_id": "110212708220762723780623631669128285743865261243074067496163475281418328413543",
+            "timestamp": "1793487370444",
+            "hash": "43f855733c179fc034ebe5cae47a30db7c3aeca1",
+            "bids": [{"price": "0.001", "size": "4000021.34"}],
+            "asks": [{"price": "0.999", "size": "16876"}],
+            "min_order_size": "5",
+            "tick_size": "0.001",
+            "neg_risk": true,
+            "last_trade_price": ""
+        });
+        let book: OrderBookSummary = serde_json::from_value(sent.clone()).unwrap();
+        assert_eq!(book.last_trade_price, None);
+
+        let archived = serde_json::to_value(&book).unwrap();
+        assert_eq!(archived, sent, "archived as it was sent");
+        let read = SnapshotBook::parse(&archived).unwrap();
+        assert_eq!(read.last_trade_price, None);
+        assert_eq!(read.bids.len(), 1);
+    }
+}

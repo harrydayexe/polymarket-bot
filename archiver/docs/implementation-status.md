@@ -30,7 +30,15 @@ The recording path is complete and has been run against live Polymarket. `archiv
 
 A run at `min_liquidity_usd = 50000` tracked 946 markets (1,892 tokens) on 8 connections. A 12-minute release-build soak across an hour boundary rotated and compressed the finished hour (about 8× smaller) and picked up new markets as they qualified. It ran at about 100 MB of memory and 4% of one CPU, with about 16 MB of raw JSON a minute (24 GB a day, about 3 GB compressed), and stopped on SIGTERM cleanly with no gaps. It received a full book for every token on subscribe and about 20,000 messages a minute, with no undecodable messages. The queue's high-water mark was 1,829 of 100,000. It stopped cleanly in 2 s. Restarting after a hard kill recorded a `process_restart` gap for 1,896 tokens and renamed the 3 files left open. Compacting the recorded data balanced the accounting with nothing in `unparsed`. `verify` found 227 matching windows and no mismatches, which is early support for the first assumption in section 16: `size` in `price_change` is the new total.
 
-**Known issue, waiting on marcasite: REST snapshots mostly fail.** `/books` sends `"last_trade_price": ""` for a token that has not traded. marcasite 0.1.3 rejects that, so every batch that contains such a token fails, and live that was nearly every batch. Each failure is recorded as `snapshot_failed` and retried at the next round. The websocket's full books, which arrive for every token on subscribe, are unaffected and remain the anchors. All Polymarket access goes through marcasite, so the fix belongs there; once a release accepts the empty string, upgrade the dependency and nothing else needs to change.
+**REST snapshots (fixed in marcasite 0.2.0).** `/books` sends `"last_trade_price": ""` for a token that has not traded. marcasite 0.1.3 rejected it, so nearly every batch failed. The archiver now uses marcasite 0.2.0, which decodes it as `None`. Verified live on 2026-11-01:
+- `archiver snapshot --all` returned 1,876 books for 1,926 tokens in 4 batches, all succeeding.
+- A recording run wrote its subscribe and scheduled snapshots with no `snapshot_failed`. That came to 1,458 books, 127 of them for untraded tokens, archived with `""` as sent.
+
+`verify` then checked those snapshots against the websocket stream: 182 windows matched and 6 did not, each by one level, and nothing was lost in the archiver (no drops or gaps):
+- **Two** (one YES/NO pair) are a verifier artifact: the websocket stamps a change 1 ms after the snapshot's `timestamp`, but the snapshot already includes it.
+- **Four** (two pairs) are cases where the websocket's book on subscribe and a REST snapshot about 3 s later disagree on one level, with no websocket change between them. The websocket reports the new size only later.
+
+Both are about how the exchange's two sources line up, which `verify` should learn to tolerate (see 4).
 
 ## 3. Differences from the design
 
@@ -57,13 +65,13 @@ Earlier differences (config key names, marcasite's channel owning heartbeats, no
 
 Roughly in order of value:
 
-0. **Upgrade marcasite** once it accepts an empty `last_trade_price` in `/books` (see 2), so REST snapshots are recorded.
 
 1. **Raw retention** (`raw_retention` has no effect): delete raw files of compacted days after the retention period, once the compactor has been trusted for a while.
 2. **Integration scenarios against the archive on disk** (14.4). `commands::run` has three in-process end-to-end tests: a clean recording, crash recovery and the lock. Missing scenarios include a slow or full disk, an hour boundary under load, and a Gamma outage through the whole program. There are no process-level CLI tests (14.5) or soak test (14.6) beyond the live run above.
 3. **Recorded fixtures** from real data for the compactor and verifier tests (they use hand-written events).
 4. **Command-line overrides of config values.**
 5. `verify` reports each token's first book of a day as `no_anchor`, and each run boundary as not checkable.
+   It also counts as mismatches the brief disagreements between the websocket and REST snapshots described in 2. It could allow a few milliseconds of skew around a snapshot's timestamp, and report a difference that the stream corrects soon after as such, rather than as a mismatch.
 6. Performance of `compact` on a full day is unmeasured. It took 10 s for 3 minutes of data in a debug build, so measure a release build on a real day.
 
 ## 5. Open decisions for the owner
