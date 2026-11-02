@@ -24,6 +24,9 @@ macro_rules! bail {
     };
 }
 
+/// Longest any duration setting may be.
+const MAX_DURATION: Duration = Duration::from_hours(10 * 365 * 24);
+
 #[derive(Error, Diagnostic, Debug)]
 pub enum ConfigError {
     #[error("could not read config file {path}")]
@@ -75,6 +78,10 @@ pub struct Config {
     /// `backoff_initial`.
     #[serde(with = "humantime_serde")]
     pub backoff_reset_after: Duration,
+    /// How long a subscribed token may go without a full book before a REST snapshot is
+    /// requested for it, and that snapshot may take before the token is marked unhealthy.
+    #[serde(with = "humantime_serde")]
+    pub missing_book_timeout: Duration,
     #[serde(with = "humantime_serde")]
     pub snapshot_interval: Duration,
     pub snapshot_batch_size: usize,
@@ -108,6 +115,7 @@ impl Default for Config {
             backoff_initial: Duration::from_secs(1),
             backoff_max: Duration::from_secs(60),
             backoff_reset_after: Duration::from_mins(5),
+            missing_book_timeout: Duration::from_mins(2),
             snapshot_interval: Duration::from_mins(60),
             snapshot_batch_size: 500,
             snapshot_max_requests_per_s: 2,
@@ -126,6 +134,18 @@ impl Default for Config {
 }
 
 impl Config {
+    /// A short fingerprint of the settings, recorded in `run_start` so later analysis can tell
+    /// whether they changed between runs. Stable for a given program version.
+    pub fn fingerprint(&self) -> String {
+        // FNV-1a over the debug form: every setting, in declaration order.
+        let hash = format!("{self:?}")
+            .bytes()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+                (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+            });
+        format!("{hash:016x}")
+    }
+
     /// Reads, parses and validates the config file at `path`.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
@@ -165,12 +185,36 @@ impl Config {
             ("heartbeat_interval", self.heartbeat_interval),
             ("connect_timeout", self.connect_timeout),
             ("backoff_initial", self.backoff_initial),
+            ("missing_book_timeout", self.missing_book_timeout),
             ("snapshot_interval", self.snapshot_interval),
             ("flush_interval", self.flush_interval),
             ("sync_interval", self.sync_interval),
         ];
         for (key, value) in non_zero_durations {
             ensure!(!value.is_zero(), "{key} must be greater than 0");
+        }
+        let all_durations = [
+            ("registry_interval", self.registry_interval),
+            ("closed_grace_period", self.closed_grace_period),
+            ("heartbeat_interval", self.heartbeat_interval),
+            ("heartbeat_timeout", self.heartbeat_timeout),
+            ("connect_timeout", self.connect_timeout),
+            ("backoff_initial", self.backoff_initial),
+            ("backoff_max", self.backoff_max),
+            ("backoff_reset_after", self.backoff_reset_after),
+            ("missing_book_timeout", self.missing_book_timeout),
+            ("snapshot_interval", self.snapshot_interval),
+            ("flush_interval", self.flush_interval),
+            ("sync_interval", self.sync_interval),
+            ("raw_retention", self.raw_retention),
+        ];
+        for (key, value) in all_durations {
+            // Keeps time arithmetic far from overflow.
+            ensure!(
+                value <= MAX_DURATION,
+                "{key} must not exceed {}",
+                format_duration(MAX_DURATION)
+            );
         }
 
         ensure!(
@@ -350,6 +394,12 @@ mod tests {
     fn negative_liquidity_is_refused() {
         let msg = validation_err("min_liquidity_usd = -1.0");
         assert!(msg.contains("min_liquidity_usd"), "{msg}");
+    }
+
+    #[test]
+    fn huge_durations_are_refused() {
+        let msg = validation_err("missing_book_timeout = \"500years\"");
+        assert!(msg.contains("missing_book_timeout"), "{msg}");
     }
 
     #[test]

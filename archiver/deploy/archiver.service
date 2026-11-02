@@ -1,0 +1,29 @@
+# The recorder. Install the binary at /usr/local/bin/archiver and the config at
+# /etc/archiver/config.toml (set archive_dir, e.g. /var/lib/archiver/archive), then:
+#   sudo useradd --system --home /var/lib/archiver --create-home archiver
+#   sudo cp archiver.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now archiver
+# Logs: journalctl -u archiver -f
+[Unit]
+Description=Polymarket order book archiver
+Wants=network-online.target time-sync.target
+After=network-online.target time-sync.target
+# Keep restarting however often it fails (e.g. while Gamma is unreachable at startup).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=archiver
+Group=archiver
+WorkingDirectory=/var/lib/archiver
+ExecStart=/usr/local/bin/archiver run --config /etc/archiver/config.toml
+# A stop takes at most 15 s (connections closed, queue drained, files renamed); the
+# next start records a process_restart gap for anything lost if it is killed.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
 use marcasite::types::{ConditionId, TokenId};
+use serde::{Deserialize, Serialize};
 
 /// The two tokens of a market. They are always tracked together.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarketTokens {
     pub yes: TokenId,
     pub no: TokenId,

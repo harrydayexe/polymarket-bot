@@ -82,6 +82,11 @@ impl GapTracker {
         })
     }
 
+    /// How many tokens have a gap open.
+    pub fn open_count(&self) -> usize {
+        self.open_gaps.len()
+    }
+
     /// Closes every open gap.
     pub fn close_all(&mut self, end: DateTime<Utc>, reason: &GapReason) -> Option<ControlBody> {
         let tokens: HashSet<TokenId> = self.open_gaps.keys().cloned().collect();

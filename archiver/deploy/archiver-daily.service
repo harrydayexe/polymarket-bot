@@ -1,0 +1,14 @@
+# Compacts every finished day not yet compacted, then verifies yesterday.
+# Started by archiver-daily.timer. Set --since to the first day the recorder ran.
+[Unit]
+Description=Polymarket archiver daily compaction and verification
+
+[Service]
+Type=oneshot
+User=archiver
+Group=archiver
+WorkingDirectory=/var/lib/archiver
+ExecStart=/usr/local/bin/archiver compact --config /etc/archiver/config.toml --since 2026-10-30
+ExecStart=/usr/local/bin/archiver verify --config /etc/archiver/config.toml
+Nice=10
+IOSchedulingClass=idle

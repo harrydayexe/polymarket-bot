@@ -279,6 +279,7 @@ mod tests {
         async fn token_changes(&mut self) -> TokenChanges {
             match self.conn_mgr.recv().await {
                 Some(ConnectionManagerMsg::TokenChanges(changes)) => changes,
+                Some(other) => panic!("unexpected message: {other:?}"),
                 None => panic!("registry task ended"),
             }
         }
