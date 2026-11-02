@@ -35,10 +35,10 @@ A run at `min_liquidity_usd = 50000` tracked 946 markets (1,892 tokens) on 8 con
 - A recording run wrote its subscribe and scheduled snapshots with no `snapshot_failed`. That came to 1,458 books, 127 of them for untraded tokens, archived with `""` as sent.
 
 `verify` then checked those snapshots against the websocket stream: 182 windows matched and 6 did not, each by one level, and nothing was lost in the archiver (no drops or gaps):
-- **Two** (one YES/NO pair) are a verifier artifact: the websocket stamps a change 1 ms after the snapshot's `timestamp`, but the snapshot already includes it.
+- **Two** (one YES/NO pair) were a verifier artifact: the websocket stamps a change 1 ms after the snapshot's `timestamp`, but the snapshot already includes it. `verify` now allows 10 ms of skew between a snapshot's timestamp and the stream's (`SNAPSHOT_TIME_SKEW` in `src/verifier/checker.rs`), and these windows match.
 - **Four** (two pairs) are cases where the websocket's book on subscribe and a REST snapshot about 3 s later disagree on one level, with no websocket change between them. The websocket reports the new size only later.
 
-Both are about how the exchange's two sources line up, which `verify` should learn to tolerate (see 4).
+The four still show as mismatches: they are real disagreements between the exchange's two sources, and `verify` reports them as such (see 4).
 
 ## 3. Differences from the design
 
@@ -71,7 +71,7 @@ Roughly in order of value:
 3. **Recorded fixtures** from real data for the compactor and verifier tests (they use hand-written events).
 4. **Command-line overrides of config values.**
 5. `verify` reports each token's first book of a day as `no_anchor`, and each run boundary as not checkable.
-   It also counts as mismatches the brief disagreements between the websocket and REST snapshots described in 2. It could allow a few milliseconds of skew around a snapshot's timestamp, and report a difference that the stream corrects soon after as such, rather than as a mismatch.
+   It also counts as mismatches the brief disagreements between the websocket's book on subscribe and a REST snapshot described in 2. It could report a difference that the stream corrects soon after as such, rather than as a mismatch.
 6. Performance of `compact` on a full day is unmeasured. It took 10 s for 3 minutes of data in a debug build, so measure a release build on a real day.
 
 ## 5. Open decisions for the owner

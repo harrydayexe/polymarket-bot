@@ -520,7 +520,8 @@ fn a_snapshot_anchor_reapplies_changes_at_its_own_time() {
         [
             not_checkable(NotCheckableReason::NoAnchor),
             WindowResult::Match,
-            not_checkable(NotCheckableReason::AmbiguousOrder),
+            // Consistent with the snapshot being taken just before the change at 2100.
+            WindowResult::Match,
             // The removal at 2100 is applied again on top of the snapshot.
             WindowResult::Match
         ]
@@ -529,7 +530,7 @@ fn a_snapshot_anchor_reapplies_changes_at_its_own_time() {
 }
 
 #[test]
-fn a_snapshot_target_differing_only_at_its_own_time_is_ambiguous() {
+fn a_snapshot_target_without_a_change_at_its_own_time_matches() {
     let mut day = Day::new();
     day.ws(50, book_json("A", 0, &[("0.5", "10")], &[]));
     day.ws(1050, changes_json(1000, &[("A", "BUY", "0.4", "1")]));
@@ -544,10 +545,78 @@ fn a_snapshot_target_differing_only_at_its_own_time_is_ambiguous() {
             &[],
         )],
     );
+    assert_eq!(results(&day.check())[1], WindowResult::Match);
+}
+
+/// As seen live: the snapshot stamped 1100 already has a removal the websocket stamps 1101.
+#[test]
+fn a_snapshot_target_with_a_change_stamped_just_after_it_matches() {
+    let mut day = Day::new();
+    day.ws(
+        50,
+        book_json("A", 0, &[], &[("0.36", "937"), ("0.45", "5")]),
+    );
+    day.ws(1060, changes_json(1100, &[("A", "SELL", "0.45", "0")]));
+    day.ws(1061, changes_json(1101, &[("A", "SELL", "0.36", "0")]));
+    day.snapshot(1500, vec![snapshot_json("A", 1100, &[], &[])]);
+    assert_eq!(results(&day.check())[1], WindowResult::Match);
+}
+
+#[test]
+fn a_snapshot_target_missing_a_change_stamped_just_before_it_matches() {
+    let mut day = Day::new();
+    day.ws(50, book_json("A", 0, &[("0.5", "10")], &[]));
+    day.ws(1050, changes_json(1095, &[("A", "BUY", "0.3", "2")]));
+    day.snapshot(1200, vec![snapshot_json("A", 1100, &[("0.5", "10")], &[])]);
+    assert_eq!(results(&day.check())[1], WindowResult::Match);
+}
+
+#[test]
+fn a_change_well_after_a_snapshot_is_not_tolerated() {
+    let mut day = Day::new();
+    day.ws(50, book_json("A", 0, &[("0.5", "10")], &[]));
+    // 50 ms after the snapshot's time: far more than the skew.
+    day.ws(1060, changes_json(1150, &[("A", "BUY", "0.5", "0")]));
+    day.snapshot(1200, vec![snapshot_json("A", 1100, &[], &[])]);
+    assert_eq!(last_mismatch(&day.check()), 1);
+}
+
+#[test]
+fn changes_either_side_of_a_snapshot_that_no_cutoff_explains_are_ambiguous() {
+    let mut day = Day::new();
+    day.ws(50, book_json("A", 0, &[("0.5", "10")], &[]));
+    day.ws(1050, changes_json(1095, &[("A", "BUY", "0.3", "2")]));
+    day.ws(1060, changes_json(1105, &[("A", "BUY", "0.4", "1")]));
+    // Has the later change but not the earlier one.
+    day.snapshot(
+        1200,
+        vec![snapshot_json(
+            "A",
+            1100,
+            &[("0.5", "10"), ("0.4", "1")],
+            &[],
+        )],
+    );
     assert_eq!(
         results(&day.check())[1],
         not_checkable(NotCheckableReason::AmbiguousOrder)
     );
+}
+
+#[test]
+fn a_snapshot_anchor_reapplies_changes_stamped_just_before_it() {
+    let mut day = Day::new();
+    day.ws(50, book_json("A", 0, &[("0.5", "10")], &[]));
+    day.ws(1050, changes_json(1095, &[("A", "BUY", "0.3", "2")]));
+    // Taken at 1100 but without the change at 1095.
+    day.snapshot(1200, vec![snapshot_json("A", 1100, &[("0.5", "10")], &[])]);
+    day.ws(
+        2050,
+        book_json("A", 2000, &[("0.5", "10"), ("0.3", "2")], &[]),
+    );
+    let report = day.check();
+    assert_eq!(results(&report)[2], WindowResult::Match);
+    assert_eq!(report.windows[2].changes, 1, "carried over");
 }
 
 #[test]

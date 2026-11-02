@@ -126,8 +126,9 @@ pub enum NotCheckableReason {
     Unsubscribed,
     /// A level change for the token in the window could not be read.
     UnreadableChange,
-    /// The target is a snapshot, and only levels changed at the snapshot's exact exchange
-    /// time differ: whether the snapshot includes those changes cannot be told.
+    /// The target is a snapshot, and only levels changed within
+    /// [SNAPSHOT_TIME_SKEW](super::checker::SNAPSHOT_TIME_SKEW) of the snapshot's exchange time
+    /// differ: whether the snapshot includes those changes cannot be told.
     AmbiguousOrder,
 }
 

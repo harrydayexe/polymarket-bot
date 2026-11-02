@@ -7,15 +7,20 @@
 //! anchor, and comparing the result with the target. The target then becomes the next anchor.
 //!
 //! A REST snapshot is taken apart from the stream, so archive order does not say which changes
-//! it includes. Its exchange timestamp does instead:
+//! it includes. Its exchange timestamp does instead, though only to within
+//! [SNAPSHOT_TIME_SKEW]: live, a snapshot stamped `T` can already include a change the
+//! websocket stamps `T + 1 ms`.
 //!
-//! - **Snapshot target** at time `T`: only changes with exchange time `<= T` are applied.
-//!   Changes at exactly `T` may or may not be in it, so when every differing level is one
-//!   changed at `T` the window is [NotCheckableReason::AmbiguousOrder] rather than a mismatch.
-//! - **Snapshot anchor** at time `T`: changes recorded before it with exchange time `>= T` may
-//!   be missing from it, so they are carried into the next window and applied again first.
-//!   Since a change carries the new total size of its level, applying one the snapshot already
-//!   includes changes nothing (later changes to that level are applied after it).
+//! - **Snapshot target** at time `T`: the window matches if the rebuilt book equals the
+//!   snapshot when the changes applied are those with exchange time up to `T`, up to
+//!   `T + skew`, or up to `T - skew`. Otherwise, when every differing level is one changed
+//!   within the skew of `T`, the window is [NotCheckableReason::AmbiguousOrder] rather than a
+//!   mismatch.
+//! - **Snapshot anchor** at time `T`: changes recorded before it with exchange time
+//!   `>= T - skew` may be missing from it, so they are carried into the next window and
+//!   applied again first. Since a change carries the new total size of its level, applying one
+//!   the snapshot already includes changes nothing (later changes to that level are applied
+//!   after it).
 //!
 //! A window is not checkable if the token had no anchor yet, the anchor is from an earlier
 //! run, a recorded gap or an unsubscribed period overlaps it (by receive time), or one of its
@@ -24,7 +29,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, TimeDelta, Utc};
 use marcasite::{types::TokenId, ws::MarketEvent};
 use rust_decimal::Decimal;
 use serde_json::Value;
@@ -44,6 +49,10 @@ use crate::{
         },
     },
 };
+
+/// How far apart a snapshot's exchange timestamp and the websocket's timestamps for the same
+/// moment can be. The skew seen live is 1 ms; this allows some margin.
+pub const SNAPSHOT_TIME_SKEW: TimeDelta = TimeDelta::milliseconds(10);
 
 /// A level change kept for a window, without its token.
 #[derive(Debug, Clone, Copy)]
@@ -265,7 +274,7 @@ impl Checker {
         let at = target.as_of();
         match source {
             BookSource::Ws => state.changes.clear(),
-            BookSource::Snapshot => state.changes.retain(|c| c.at >= at),
+            BookSource::Snapshot => state.changes.retain(|c| c.at >= at - SNAPSHOT_TIME_SKEW),
         }
         state.unreadable = false;
         state.anchor = Some(Anchor {
@@ -291,15 +300,30 @@ fn compare(
     target: &OrderBook,
     source: BookSource,
 ) -> WindowResult {
-    let cutoff = target.as_of();
-    let mut rebuilt = anchor.clone();
-    for change in changes {
-        if source == BookSource::Snapshot && change.at > cutoff {
-            continue;
+    let rebuild = |cutoff: Option<DateTime<Utc>>| {
+        let mut rebuilt = anchor.clone();
+        for change in changes {
+            if cutoff.is_some_and(|cutoff| change.at > cutoff) {
+                continue;
+            }
+            rebuilt.set_level(change.side, change.price, change.size, change.at);
         }
-        rebuilt.set_level(change.side, change.price, change.size, change.at);
-    }
+        rebuilt
+    };
+
+    let at = target.as_of();
+    let rebuilt = match source {
+        BookSource::Ws => rebuild(None),
+        BookSource::Snapshot => rebuild(Some(at)),
+    };
     if rebuilt.same_levels(target) {
+        return WindowResult::Match;
+    }
+    if source == BookSource::Snapshot
+        && [at + SNAPSHOT_TIME_SKEW, at - SNAPSHOT_TIME_SKEW]
+            .into_iter()
+            .any(|cutoff| rebuild(Some(cutoff)).same_levels(target))
+    {
         return WindowResult::Match;
     }
 
@@ -307,7 +331,7 @@ fn compare(
     if source == BookSource::Snapshot {
         let ambiguous: HashSet<(BookSide, Decimal)> = changes
             .iter()
-            .filter(|c| c.at == cutoff)
+            .filter(|c| (c.at - at).abs() <= SNAPSHOT_TIME_SKEW)
             .map(|c| (c.side, c.price.normalize()))
             .collect();
         if !ambiguous.is_empty()
