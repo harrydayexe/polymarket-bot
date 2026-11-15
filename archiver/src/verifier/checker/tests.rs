@@ -604,6 +604,51 @@ fn changes_either_side_of_a_snapshot_that_no_cutoff_explains_are_ambiguous() {
 }
 
 #[test]
+fn a_websocket_book_older_than_the_snapshot_before_it_is_out_of_order() {
+    let mut day = Day::new();
+    // The subscribe snapshot is written first, but was taken after the websocket's first
+    // book was produced, and already has a change that book does not.
+    day.snapshot(40, vec![snapshot_json("A", 30, &[("0.5", "7")], &[])]);
+    day.ws(50, book_json("A", 0, &[("0.5", "10")], &[]));
+    // The stream then delivers that change, and carries on from its own book.
+    day.ws(60, changes_json(30, &[("A", "BUY", "0.5", "7")]));
+    day.ws(1050, changes_json(1000, &[("A", "BUY", "0.4", "1")]));
+    day.ws(
+        2000,
+        book_json("A", 1900, &[("0.5", "7"), ("0.4", "1")], &[]),
+    );
+    assert_eq!(
+        results(&day.check()),
+        [
+            not_checkable(NotCheckableReason::NoAnchor),
+            not_checkable(NotCheckableReason::OutOfOrder),
+            WindowResult::Match,
+        ]
+    );
+}
+
+#[test]
+fn a_snapshot_older_than_the_websocket_book_before_it_is_passed_over() {
+    let mut day = Day::new();
+    day.ws(50, book_json("A", 1000, &[("0.5", "7")], &[]));
+    // Served late: the book as it was before the change the websocket book includes.
+    day.snapshot(1200, vec![snapshot_json("A", 900, &[("0.5", "10")], &[])]);
+    day.ws(1300, changes_json(1250, &[("A", "BUY", "0.4", "1")]));
+    day.ws(
+        2000,
+        book_json("A", 1900, &[("0.5", "7"), ("0.4", "1")], &[]),
+    );
+    assert_eq!(
+        results(&day.check()),
+        [
+            not_checkable(NotCheckableReason::NoAnchor),
+            not_checkable(NotCheckableReason::OutOfOrder),
+            WindowResult::Match,
+        ]
+    );
+}
+
+#[test]
 fn a_snapshot_anchor_reapplies_changes_stamped_just_before_it() {
     let mut day = Day::new();
     day.ws(50, book_json("A", 0, &[("0.5", "10")], &[]));

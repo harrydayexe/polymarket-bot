@@ -22,6 +22,13 @@
 //!   the snapshot already includes changes nothing (later changes to that level are applied
 //!   after it).
 //!
+//! The two sources are not ordered against each other either: a book recorded after the anchor
+//! can describe an earlier moment. On every subscribe the websocket's first book and the REST
+//! snapshot requested for it race, and whichever was produced first may be written second. A
+//! target from the other source whose exchange time is more than the skew before the
+//! anchor's is [NotCheckableReason::OutOfOrder]: an older websocket book still becomes the
+//! next anchor (the stream carries on from it), an older snapshot is passed over.
+//!
 //! A window is not checkable if the token had no anchor yet, the anchor is from an earlier
 //! run, a recorded gap or an unsubscribed period overlaps it (by receive time), or one of its
 //! changes could not be read. A book identical to the anchor (same levels and exchange time)
@@ -246,10 +253,19 @@ impl Checker {
                     Some(InterruptionKind::Gap) => Some(NotCheckableReason::Gap),
                     Some(InterruptionKind::Unsubscribed) => Some(NotCheckableReason::Unsubscribed),
                     None if state.unreadable => Some(NotCheckableReason::UnreadableChange),
+                    None if anchor.source != source
+                        && target.as_of() < anchor.book.as_of() - SNAPSHOT_TIME_SKEW =>
+                    {
+                        Some(NotCheckableReason::OutOfOrder)
+                    }
                     None => None,
                 }
             }
         };
+        // A snapshot older than the websocket book it follows says nothing new, and as an
+        // anchor it would lack the changes already folded into that book.
+        let keep_anchor =
+            source == BookSource::Snapshot && not_checkable == Some(NotCheckableReason::OutOfOrder);
         let result = match (not_checkable, &state.anchor) {
             (Some(reason), _) => WindowResult::NotCheckable { reason },
             (None, Some(anchor)) => compare(&anchor.book, &state.changes, &target, source),
@@ -264,6 +280,9 @@ impl Checker {
             changes: state.changes.len(),
             result,
         });
+        if keep_anchor {
+            return;
+        }
 
         // The target is the next anchor.
         if target.tick_size().is_none()

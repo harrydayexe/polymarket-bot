@@ -130,6 +130,10 @@ pub enum NotCheckableReason {
     /// [SNAPSHOT_TIME_SKEW](super::checker::SNAPSHOT_TIME_SKEW) of the snapshot's exchange time
     /// differ: whether the snapshot includes those changes cannot be told.
     AmbiguousOrder,
+    /// The target is from the other source than the anchor and its exchange time is before
+    /// the anchor's: it was recorded later but describes an earlier book (a websocket book
+    /// on subscribe written after the REST snapshot taken for the same subscribe, say).
+    OutOfOrder,
 }
 
 impl NotCheckableReason {
@@ -141,6 +145,7 @@ impl NotCheckableReason {
             NotCheckableReason::Unsubscribed => "unsubscribed",
             NotCheckableReason::UnreadableChange => "unreadable change",
             NotCheckableReason::AmbiguousOrder => "ambiguous order",
+            NotCheckableReason::OutOfOrder => "out of order",
         }
     }
 }
