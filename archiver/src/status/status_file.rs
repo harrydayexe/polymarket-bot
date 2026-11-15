@@ -29,6 +29,10 @@ pub struct StatusFile {
     #[serde(default, with = "ts_microseconds_option")]
     pub durable_through: Option<DateTime<Utc>>,
     pub tokens_tracked: usize,
+    /// When the market list was last refreshed from Gamma. `None` until the first refresh
+    /// succeeds.
+    #[serde(default, with = "ts_microseconds_option")]
+    pub registry_last_success_at: Option<DateTime<Utc>>,
     pub connections: Vec<ConnectionStatus>,
     pub messages_last_minute: u64,
     pub queue: QueueStatus,

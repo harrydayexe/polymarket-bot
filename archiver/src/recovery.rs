@@ -258,6 +258,7 @@ mod tests {
             last_message_at: durable_through,
             durable_through,
             tokens_tracked: 2,
+            registry_last_success_at: None,
             connections: vec![],
             messages_last_minute: 0,
             queue: QueueStatus {

@@ -14,7 +14,7 @@ use crate::{
     clock::{SharedClock, SystemClock},
     config::Config,
     connection_manager::{manager_task::connection_manager_task, summary::manager_channels},
-    market_registry::registry_task::registry_task,
+    market_registry::registry_task::{RegistryOutputs, registry_task},
     messages::{ConnectionManagerMsg, ControlBody, GapReason, Record, RegistryMsg, SnapshotMsg},
     recovery::{lock_archive, recover},
     snapshot_worker::{
@@ -96,6 +96,7 @@ pub async fn run(
 
     let (publisher, manager_watch) = manager_channels();
     let (writer_stats_tx, writer_stats) = watch::channel(writer.stats().clone());
+    let (registry_success_tx, registry_success) = watch::channel(None);
     let mut reporter = StatusReporter::new(
         &root,
         run_id,
@@ -103,6 +104,7 @@ pub async fn run(
         config.write_queue_capacity,
         manager_watch,
         writer_stats,
+        registry_success,
     );
     reporter
         .write(started_at, false)
@@ -136,8 +138,11 @@ pub async fn run(
         token.clone(),
         registry_task(
             registry_rx,
-            conn_mgr_tx,
-            write_tx.clone(),
+            RegistryOutputs {
+                conn_mgr: conn_mgr_tx,
+                write_queue: write_tx.clone(),
+                last_success: registry_success_tx,
+            },
             token.child_token(),
             gamma,
             config.clone(),

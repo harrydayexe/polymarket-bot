@@ -9,7 +9,7 @@ use crate::{
     commands::Exit,
     config::Config,
     status::{
-        health::{Compaction, evaluate},
+        health::{Compaction, evaluate, registry_stale_after},
         status_file::{StatusFile, read_json},
     },
 };
@@ -45,6 +45,7 @@ pub async fn execute(args: CommonArgs) -> Result<()> {
         now,
         config.min_free_disk_gb,
         compaction(root, now)?,
+        registry_stale_after(config.registry_interval),
     );
     println!();
     if problems.is_empty() {
@@ -127,6 +128,10 @@ fn print_summary(s: &StatusFile, now: DateTime<Utc>) {
         );
     }
     println!("tokens         {} tracked", s.tokens_tracked);
+    match s.registry_last_success_at {
+        Some(t) => println!("market list    refreshed {} ago", ago(t)),
+        None => println!("market list    not fetched yet"),
+    }
     println!(
         "messages       {} in the last minute",
         s.messages_last_minute

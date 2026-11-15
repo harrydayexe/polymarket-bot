@@ -22,12 +22,22 @@ pub enum Compaction {
     },
 }
 
-/// Why the recorder is unhealthy; empty when healthy.
+/// How long the market list may go without a refresh from Gamma: a few refreshes may fail,
+/// but not for longer than this.
+pub fn registry_stale_after(registry_interval: std::time::Duration) -> TimeDelta {
+    TimeDelta::from_std(registry_interval * 4)
+        .unwrap_or(TimeDelta::MAX)
+        .max(TimeDelta::minutes(30))
+}
+
+/// Why the recorder is unhealthy; empty when healthy. `registry_stale_after` is from
+/// [registry_stale_after].
 pub fn evaluate(
     status: &StatusFile,
     now: DateTime<Utc>,
     min_free_disk_gb: u64,
     compaction: Compaction,
+    registry_stale_after: TimeDelta,
 ) -> Vec<String> {
     let mut problems = vec![];
     let age = now - status.written_at;
@@ -68,6 +78,18 @@ pub fn evaluate(
                 silent_for.num_minutes()
             ));
         }
+    }
+
+    // Recording goes on without Gamma, but no new market joins and no closed one leaves.
+    let registry_age = now - status.registry_last_success_at.unwrap_or(status.started_at);
+    if registry_age > registry_stale_after {
+        problems.push(match status.registry_last_success_at {
+            Some(_) => format!(
+                "market list not refreshed from Gamma for {} minutes",
+                registry_age.num_minutes()
+            ),
+            None => "market list never fetched from Gamma".to_string(),
+        });
     }
 
     let q = &status.queue;
@@ -127,6 +149,7 @@ mod tests {
             last_message_at: Some(now() - TimeDelta::seconds(1)),
             durable_through: Some(now() - TimeDelta::seconds(4)),
             tokens_tracked: 4,
+            registry_last_success_at: Some(now() - TimeDelta::minutes(4)),
             connections: vec![ConnectionStatus {
                 slot: ConnSlotId::new("c-0001"),
                 state: "streaming".into(),
@@ -151,14 +174,30 @@ mod tests {
         }
     }
 
+    fn stale_after() -> TimeDelta {
+        registry_stale_after(std::time::Duration::from_mins(5))
+    }
+
+    #[test]
+    fn a_market_list_that_is_not_refreshed_is_a_problem() {
+        let mut s = healthy();
+        s.registry_last_success_at = Some(now() - TimeDelta::minutes(29));
+        assert!(problems(&s).is_empty());
+        s.registry_last_success_at = Some(now() - TimeDelta::minutes(31));
+        assert!(problems(&s)[0].contains("not refreshed from Gamma for 31 minutes"));
+        // Never fetched, four hours after starting.
+        s.registry_last_success_at = None;
+        assert!(problems(&s)[0].contains("never fetched"));
+    }
+
     fn problems(status: &StatusFile) -> Vec<String> {
-        evaluate(status, now(), 10, Compaction::NotDue)
+        evaluate(status, now(), 10, Compaction::NotDue, stale_after())
     }
 
     #[test]
     fn all_good() {
         assert!(problems(&healthy()).is_empty());
-        assert!(evaluate(&healthy(), now(), 10, Compaction::Done).is_empty());
+        assert!(evaluate(&healthy(), now(), 10, Compaction::Done, stale_after()).is_empty());
     }
 
     #[test]
@@ -226,7 +265,13 @@ mod tests {
     #[test]
     fn compaction_late() {
         let date = NaiveDate::from_ymd_opt(2026, 9, 24).unwrap();
-        let p = evaluate(&healthy(), now(), 10, Compaction::Missing { date });
+        let p = evaluate(
+            &healthy(),
+            now(),
+            10,
+            Compaction::Missing { date },
+            stale_after(),
+        );
         assert_eq!(p, ["2026-09-24 has not been compacted"]);
     }
 

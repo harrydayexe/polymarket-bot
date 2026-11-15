@@ -44,6 +44,8 @@ pub struct StatusReporter {
     queue_capacity: usize,
     manager: ManagerWatch,
     writer: watch::Receiver<WriterStats>,
+    /// When the registry last refreshed the market list.
+    registry: watch::Receiver<Option<DateTime<Utc>>>,
     samples: VecDeque<Sample>,
     /// The tracked tokens last written, to rewrite the file only when they change.
     tracked_written: Option<Arc<Vec<TokenId>>>,
@@ -57,6 +59,7 @@ impl StatusReporter {
         queue_capacity: usize,
         manager: ManagerWatch,
         writer: watch::Receiver<WriterStats>,
+        registry: watch::Receiver<Option<DateTime<Utc>>>,
     ) -> Self {
         // The list the manager starts with (empty) is not written, so it never replaces the
         // previous run's list, which recovery may still need, before anything is tracked.
@@ -68,6 +71,7 @@ impl StatusReporter {
             queue_capacity,
             manager,
             writer,
+            registry,
             samples: VecDeque::new(),
             tracked_written,
         }
@@ -101,6 +105,7 @@ impl StatusReporter {
             last_message_at: manager.last_message_at,
             durable_through: writer.durable_through,
             tokens_tracked: manager.tokens_tracked,
+            registry_last_success_at: *self.registry.borrow(),
             connections: manager
                 .connections
                 .iter()
@@ -277,6 +282,7 @@ mod tests {
             100,
             watch,
             writer_rx,
+            watch::channel(Some(at("2026-09-25T14:04:00Z"))).1,
         );
         Harness {
             dir,

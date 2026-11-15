@@ -23,6 +23,12 @@ use crate::{
 /// Gamma listing cannot add it straight back.
 const RECENTLY_REMOVED_INTERVALS: u32 = 3;
 
+/// How many listings in a row may be rejected as unbelievable before the next is accepted
+/// anyway. A real drop (many markets resolving at once, or falling below the liquidity floor)
+/// looks like a bad response at first; without this the registry would reject every listing
+/// from then on and never pick up a new market.
+const REJECTIONS_BEFORE_ACCEPTING: u32 = 3;
+
 /// Changes to the tracked set worked out from one Gamma listing.
 #[derive(Debug, Default)]
 pub struct PlannedChanges {
@@ -67,6 +73,8 @@ pub struct Registry {
     pending_resolved: HashMap<ConditionId, DateTime<Utc>>,
     last_accepted_count: u64,
     last_success_at: Option<DateTime<Utc>>,
+    /// Listings rejected by the sanity check since the last one accepted.
+    rejections: u32,
 }
 
 impl Registry {
@@ -78,7 +86,19 @@ impl Registry {
             pending_resolved: HashMap::new(),
             last_accepted_count: 0,
             last_success_at: None,
+            rejections: 0,
         }
+    }
+
+    /// When a Gamma listing was last accepted and applied.
+    pub fn last_success_at(&self) -> Option<DateTime<Utc>> {
+        self.last_success_at
+    }
+
+    /// Notes that the listing just checked was rejected, so a count that stays low is
+    /// eventually believed (see [REJECTIONS_BEFORE_ACCEPTING]).
+    pub fn note_rejected(&mut self) {
+        self.rejections += 1;
     }
 
     /// Start the grace period for a market resolved on the websocket at `at`.
@@ -134,7 +154,10 @@ impl Registry {
         changes
     }
 
-    /// Count the qualifying markets in a Gamma listing and check it is believable.
+    /// Count the qualifying markets in a Gamma listing and check it is believable. A count
+    /// that has been rejected [REJECTIONS_BEFORE_ACCEPTING] times running is accepted: nothing
+    /// is unsubscribed on the strength of a listing alone (tracked markets stay until Gamma
+    /// says they closed), so believing a persistently short listing is safe.
     ///
     /// # Returns
     ///
@@ -146,7 +169,17 @@ impl Registry {
             .map(|market| &market.condition_id)
             .collect::<HashSet<_>>()
             .len() as u64;
-        sanity_check(qualifying, self.last_accepted_count)?;
+        if let Err(e) = sanity_check(qualifying, self.last_accepted_count) {
+            if self.rejections < REJECTIONS_BEFORE_ACCEPTING {
+                return Err(e);
+            }
+            tracing::warn!(
+                qualifying,
+                previous = self.last_accepted_count,
+                rejections = self.rejections,
+                "Gamma keeps returning few qualifying markets, accepting the listing"
+            );
+        }
         Ok(qualifying)
     }
 
@@ -255,6 +288,7 @@ impl Registry {
     pub fn apply_plan(&mut self, plan: PlannedChanges, now: DateTime<Utc>) -> AppliedChanges {
         self.last_accepted_count = plan.accepted_count;
         self.last_success_at = Some(now);
+        self.rejections = 0;
 
         let mut applied = AppliedChanges::default();
 
@@ -576,6 +610,24 @@ mod tests {
         let mut registry = registry();
         cycle(&mut registry, vec![market(1, json!({}))], vec![], t0());
 
+        assert!(registry.check_listing(&[]).is_err());
+    }
+
+    #[test]
+    fn a_listing_that_stays_short_is_accepted_in_the_end() {
+        let mut registry = registry();
+        let four: Vec<_> = (1..=4).map(|n| market(n, json!({}))).collect();
+        cycle(&mut registry, four, vec![], t0());
+
+        let one = vec![market(1, json!({}))];
+        for _ in 0..REJECTIONS_BEFORE_ACCEPTING {
+            assert!(registry.check_listing(&one).is_err());
+            registry.note_rejected();
+        }
+        assert_eq!(registry.check_listing(&one).unwrap(), 1);
+
+        // Accepting it starts the count again from the new, lower level.
+        cycle(&mut registry, one, vec![], t0());
         assert!(registry.check_listing(&[]).is_err());
     }
 
