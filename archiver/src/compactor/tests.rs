@@ -808,3 +808,102 @@ fn compressed_raw_files_are_read() {
     );
     assert_eq!(strs(&read(root, "frames"), "line"), frames);
 }
+
+/// Retention of 2 days, seen from 3 days after [day]: [day] is past it.
+fn prune(root: &Path) -> Vec<NaiveDate> {
+    let later = day() + chrono::TimeDelta::days(3);
+    prune_raw(root, later, std::time::Duration::from_hours(48)).unwrap()
+}
+
+fn raw_dirs(root: &Path) -> [PathBuf; 2] {
+    use crate::archive::layout::{Stream, date_dir};
+    [Stream::Ws, Stream::Snapshots].map(|s| date_dir(root, s, day()))
+}
+
+#[test]
+fn prune_deletes_raw_market_data_of_old_compacted_days() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_records(root, &all_records());
+    // Compressed after compaction, as the recorder may: still the same file.
+    compact(root).unwrap();
+    let ws = FileKey::for_time(crate::archive::layout::Stream::Ws, at(10, 0)).dir(root);
+    crate::archive::compress::compress_file(&ws.join("r-1.jsonl"), &Default::default()).unwrap();
+    let frames = read(root, "frames").num_rows();
+
+    // Within the retention period nothing goes.
+    let soon = prune_raw(root, today(), std::time::Duration::from_hours(48)).unwrap();
+    assert!(soon.is_empty());
+    assert!(raw_dirs(root).iter().all(|d| d.exists()));
+
+    assert_eq!(prune(root), [day()]);
+    assert!(raw_dirs(root).iter().all(|d| !d.exists()));
+    // Control and market files, and the tables, stay.
+    use crate::archive::layout::{Stream, files_for_date};
+    assert_eq!(
+        files_for_date(root, Stream::Control, day(), true)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        files_for_date(root, Stream::Markets, day(), true)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(read(root, "frames").num_rows(), frames);
+    assert!(prune(root).is_empty());
+
+    // Compacting the day again would empty its tables, so it is refused.
+    let err = compact(root).unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<Refusal>(),
+        Some(&Refusal::RawDeleted {
+            date: day(),
+            missing: 2
+        })
+    );
+    assert_eq!(read(root, "frames").num_rows(), frames);
+    assert!(pending_days(root, day(), today()).unwrap().is_empty());
+}
+
+#[test]
+fn prune_keeps_days_that_are_not_fully_compacted() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_records(root, &all_records());
+    assert!(prune(root).is_empty(), "not compacted");
+
+    compact(root).unwrap();
+    // A file that arrived after the compaction (a manual snapshot, say).
+    let late = FileKey::for_time(crate::archive::layout::Stream::Snapshots, at(20, 0)).dir(root);
+    std::fs::create_dir_all(&late).unwrap();
+    std::fs::write(late.join("r-2.jsonl"), b"").unwrap();
+    assert!(
+        prune(root).is_empty(),
+        "a file the compaction does not hold"
+    );
+    assert!(raw_dirs(root).iter().all(|d| d.exists()));
+
+    std::fs::remove_file(late.join("r-2.jsonl")).unwrap();
+    assert_eq!(prune(root), [day()]);
+}
+
+#[test]
+fn first_raw_date_is_the_earliest_folder_of_any_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    assert_eq!(first_raw_date(root).unwrap(), None);
+    write_records(root, &[ws(2, book_event())]);
+    let record = Record::Control {
+        recv_ts: Utc.with_ymd_and_hms(2026, 10, 18, 1, 0, 0).unwrap(),
+        conn_id: None,
+        body: ControlBody::RunStop { clean: true },
+    };
+    write_records(root, &[record]);
+    assert_eq!(
+        first_raw_date(root).unwrap(),
+        NaiveDate::from_ymd_opt(2026, 10, 18)
+    );
+}

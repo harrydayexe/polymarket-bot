@@ -14,9 +14,11 @@
 //! a crash mid-write are never read and are deleted by the next compaction of their day.
 //! Two compactions of the same day must not run at the same time.
 //!
-//! Raw retention (compressing raw files after a successful compaction and deleting them
-//! after a configurable period) is deliberately not done yet: the raw files stay the
-//! source of truth, and nothing here deletes or changes them.
+//! Raw retention: [prune_raw] deletes the raw websocket and snapshot files of compacted days
+//! older than `raw_retention`. The `frames` table holds every line of them, so nothing is
+//! lost. Control and market files are small and are always kept. A day whose raw files have
+//! been deleted is never compacted again ([Refusal::RawDeleted]), since that would replace
+//! its tables with empty ones.
 
 mod route;
 mod tables;
@@ -31,7 +33,7 @@ use std::{
 };
 
 use anyhow::Context;
-use chrono::{NaiveDate, Utc};
+use chrono::{NaiveDate, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -41,7 +43,7 @@ use self::{
 };
 use crate::archive::{
     envelope::{StoredBody, StoredRecord, decode},
-    layout::{DONE_SUFFIX, OPEN_SUFFIX, PARQUET_DIR, Stream, files_for_date},
+    layout::{DONE_SUFFIX, OPEN_SUFFIX, PARQUET_DIR, Stream, date_dir, files_for_date},
     reader::read_lines,
 };
 
@@ -63,6 +65,11 @@ pub enum Refusal {
     NoRawFiles { date: NaiveDate },
     #[error("accounting check failed for {date}: {detail}")]
     Accounting { date: NaiveDate, detail: String },
+    #[error(
+        "{date} is already compacted and {missing} of its raw files have since been deleted \
+         (raw_retention); compacting it again would lose their data"
+    )]
+    RawDeleted { date: NaiveDate, missing: usize },
 }
 
 /// Settings of one compaction. Only tests change them.
@@ -182,13 +189,155 @@ pub fn pending_days(
     Ok(days)
 }
 
+/// The first date any stream has a folder for, if there is one.
+pub fn first_raw_date(root: &Path) -> anyhow::Result<Option<NaiveDate>> {
+    let mut first = None;
+    for stream in Stream::ALL {
+        for date in stream_dates(root, stream)? {
+            first = Some(first.map_or(date, |f: NaiveDate| f.min(date)));
+        }
+    }
+    Ok(first)
+}
+
+/// The dates `stream` has a `date=YYYY-MM-DD` folder for.
+fn stream_dates(root: &Path, stream: Stream) -> anyhow::Result<Vec<NaiveDate>> {
+    let dir = root.join(stream.dir());
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(e).with_context(|| format!("listing {}", dir.display())),
+    };
+    let mut dates = vec![];
+    for entry in entries {
+        let name = entry?.file_name();
+        if let Some(date) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("date="))
+            .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+        {
+            dates.push(date);
+        }
+    }
+    Ok(dates)
+}
+
+fn read_manifest(root: &Path, date: NaiveDate) -> anyhow::Result<Option<DayManifest>> {
+    let path = day_dir(root, date).join(MANIFEST_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .with_context(|| format!("{} is not valid", path.display()))
+}
+
+/// A raw file's path without the `.zst` it gains when compressed, so a file is the same
+/// file before and after.
+fn uncompressed_name(path: &str) -> &str {
+    path.strip_suffix(".zst").unwrap_or(path)
+}
+
+/// How many of the raw files a compacted day was made from are gone.
+fn deleted_inputs(root: &Path, manifest: &DayManifest) -> usize {
+    manifest
+        .inputs
+        .iter()
+        .filter(|input| {
+            let plain = root.join(uncompressed_name(&input.path));
+            let zst = PathBuf::from(format!("{}.zst", plain.display()));
+            !plain.exists() && !zst.exists()
+        })
+        .count()
+}
+
+/// Deletes the raw websocket and snapshot files of every day more than `retention` before
+/// `today` whose compaction holds all of them. A day is left alone (with a warning) if it
+/// is not compacted, its accounting did not balance, or it has a raw file its manifest does
+/// not list (written after it was compacted). Control and market files are kept.
+///
+/// # Returns
+///
+/// The days whose raw files were deleted.
+///
+/// # Errors
+///
+/// If a folder cannot be listed or deleted, or a manifest cannot be read.
+pub fn prune_raw(
+    root: &Path,
+    today: NaiveDate,
+    retention: std::time::Duration,
+) -> anyhow::Result<Vec<NaiveDate>> {
+    const STREAMS: [Stream; 2] = [Stream::Ws, Stream::Snapshots];
+    let keep_days = retention.as_secs().div_ceil(86_400).max(1);
+    let Some(cutoff) = i64::try_from(keep_days)
+        .ok()
+        .and_then(TimeDelta::try_days)
+        .and_then(|keep| today.checked_sub_signed(keep))
+    else {
+        return Ok(vec![]);
+    };
+
+    let mut dates = vec![];
+    for stream in STREAMS {
+        dates.extend(stream_dates(root, stream)?);
+    }
+    dates.sort();
+    dates.dedup();
+
+    let mut pruned = vec![];
+    for date in dates.into_iter().filter(|d| *d < cutoff) {
+        let Some(manifest) = read_manifest(root, date)? else {
+            tracing::warn!("raw files of {date} are past raw_retention but kept: not compacted");
+            continue;
+        };
+        if !manifest.accounting_ok {
+            tracing::warn!("raw files of {date} kept: its compaction did not balance");
+            continue;
+        }
+        let compacted: std::collections::HashSet<&str> = manifest
+            .inputs
+            .iter()
+            .map(|input| uncompressed_name(&input.path))
+            .collect();
+        let mut unlisted = 0;
+        for stream in STREAMS {
+            for path in files_for_date(root, stream, date, true)? {
+                let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy();
+                if !compacted.contains(uncompressed_name(&rel)) {
+                    unlisted += 1;
+                }
+            }
+        }
+        if unlisted > 0 {
+            tracing::warn!(
+                "raw files of {date} kept: {unlisted} of them are not in its compaction \
+                 (run `archiver compact --date {date}` to include them)"
+            );
+            continue;
+        }
+        for stream in STREAMS {
+            let dir = date_dir(root, stream, date);
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e).with_context(|| format!("deleting {}", dir.display())),
+            }
+        }
+        pruned.push(date);
+    }
+    Ok(pruned)
+}
+
 /// Compacts `date`, replacing any earlier compaction of it. `today` is the current UTC
 /// date. Returns the manifest written.
 ///
 /// # Errors
 ///
-/// A [Refusal] if the day is not over, has open files, has no raw files or fails the
-/// accounting check; or an I/O error. Either way any earlier output for the day is left
+/// A [Refusal] if the day is not over, has open files, has no raw files, fails the
+/// accounting check or has had raw files deleted since it was compacted; or an I/O error. Either way any earlier output for the day is left
 /// as it was.
 pub fn compact_day(
     root: &Path,
@@ -200,6 +349,12 @@ pub fn compact_day(
     let inputs = raw_files(root, date, false)?;
     if inputs.is_empty() {
         return Err(Refusal::NoRawFiles { date }.into());
+    }
+    if let Some(earlier) = read_manifest(root, date)? {
+        let missing = deleted_inputs(root, &earlier);
+        if missing > 0 {
+            return Err(Refusal::RawDeleted { date, missing }.into());
+        }
     }
 
     let parquet = root.join(PARQUET_DIR);

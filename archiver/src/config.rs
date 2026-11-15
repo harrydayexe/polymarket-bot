@@ -91,6 +91,8 @@ pub struct Config {
     pub flush_interval: Duration,
     #[serde(with = "humantime_serde")]
     pub sync_interval: Duration,
+    /// How long the raw websocket and snapshot files of a compacted day are kept before
+    /// `compact` deletes them.
     #[serde(with = "humantime_serde")]
     pub raw_retention: Duration,
     pub min_free_disk_gb: u64,
@@ -217,6 +219,12 @@ impl Config {
             );
         }
 
+        // The day before today is always kept, so `verify` can still read it after `compact`.
+        ensure!(
+            self.raw_retention >= Duration::from_hours(24),
+            "raw_retention ({}) must be at least 1 day",
+            format_duration(self.raw_retention)
+        );
         ensure!(
             self.min_liquidity_usd >= Decimal::ZERO,
             "min_liquidity_usd must be a non-negative number, got {}",
@@ -400,6 +408,16 @@ mod tests {
     fn huge_durations_are_refused() {
         let msg = validation_err("missing_book_timeout = \"500years\"");
         assert!(msg.contains("missing_book_timeout"), "{msg}");
+    }
+
+    #[test]
+    fn short_raw_retention_is_refused() {
+        let msg = validation_err("raw_retention = \"12h\"");
+        assert!(
+            msg.contains("raw_retention (12h) must be at least 1 day"),
+            "{msg}"
+        );
+        parse("raw_retention = \"1d\"").unwrap();
     }
 
     #[test]
