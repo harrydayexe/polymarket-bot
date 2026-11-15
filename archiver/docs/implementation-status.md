@@ -22,7 +22,7 @@ The recording path is complete and has been run against live Polymarket. `archiv
 | Status reporter, status file, summary log (13) | Done |
 | Startup recovery, clean shutdown (7, 12.1) | Done |
 | `check`, `status`, `markets`, `snapshot`, `gaps` | Done |
-| `compact` (11) | First version: all tables, accounting, atomic swap, manifest. No raw retention |
+| `compact` (11) | First version: all tables, accounting, atomic swap, manifest, raw retention |
 | `verify`, `OrderBook` (5.8, 10) | First version |
 | Integration and end-to-end tests (14.4, 14.5) | Partial (see 4) |
 
@@ -59,6 +59,11 @@ Earlier differences (config key names, marcasite's channel owning heartbeats, no
 - **Exit codes:** a config error still exits 78, not 2.
 - **Panics:** release builds abort on a panic, so the supervisor restarts the process and the next start records the gap. In debug builds and tests, a panicking task stops the run like a failed one.
 - **Writers lock their `.jsonl.open` files**, and startup recovery leaves locked files alone, so a recorder starting while `archiver snapshot` runs does not disturb it.
+- **Raw retention is by the day's age**, not time since compaction: `compact` deletes the raw websocket and snapshot files of days older than `raw_retention` whose manifest lists every one of them. A day whose raw files are gone is never compacted again. Control and market files are kept.
+- **A listing with fewer than half the previous qualifying markets is believed after three rejections in a row.** The design rejected it every time, which a real drop (a large event resolving) would turn into never updating the market list again. Nothing is unsubscribed on the strength of a listing alone.
+- **Health rules:** a market list not refreshed from Gamma for 30 minutes (or four `registry_interval`s, if longer) is a problem; the status file has `registry_last_success_at`.
+- **`verify` reports a book older than its anchor as `out_of_order`, not a mismatch.** On every subscribe the websocket's first book and the REST snapshot race, and the older one can be written second. In a live run on 2026-11-15 this accounted for 16 of 17 reported mismatches.
+- **`compact --all`** compacts every finished day not yet compacted, so the daily job needs no start date.
 - **The restart gap's tokens** are the tracked tokens file (when it is the crashed run's) plus the tokens the crashed run's own `subscribe` records left subscribed.
 
 ## 4. Still to do
@@ -66,7 +71,7 @@ Earlier differences (config key names, marcasite's channel owning heartbeats, no
 Roughly in order of value:
 
 
-1. **Raw retention** (`raw_retention` has no effect): delete raw files of compacted days after the retention period, once the compactor has been trusted for a while.
+1. **Parquet is never deleted or moved.** Old days have to be moved off the machine by hand (or by a backup job).
 2. **Integration scenarios against the archive on disk** (14.4). `commands::run` has three in-process end-to-end tests: a clean recording, crash recovery and the lock. Missing scenarios include a slow or full disk, an hour boundary under load, and a Gamma outage through the whole program. There are no process-level CLI tests (14.5) or soak test (14.6) beyond the live run above.
 3. **Recorded fixtures** from real data for the compactor and verifier tests (they use hand-written events).
 4. **Command-line overrides of config values.**
@@ -78,4 +83,4 @@ Roughly in order of value:
 
 - **Liquidity floor and categories** (design 16). At `min_liquidity_usd = 1000`, about 9,800 markets (19,700 tokens) qualify, about 10 times the 50,000 floor's count. The shipped `config.toml` has 2,000,000 (38 markets).
 - **`registry_interval`** is 5 minutes, which cannot meet the "tracked within 2 minutes" acceptance criterion; the design had 60 s.
-- **Disk and backup:** plan for about 3 GB a day compressed (24 GB raw while an hour is being written) at the 50,000 floor, more at lower floors. Raw files are never deleted yet.
+- **Disk and backup:** plan for about 3 GB a day compressed at the 50,000 floor, more at lower floors, plus the Parquet copy of each day. Raw market data is deleted after `raw_retention` (90 days as shipped); shorten it on a small disk.

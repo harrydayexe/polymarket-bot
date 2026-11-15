@@ -1,5 +1,6 @@
-# Compacts every finished day not yet compacted, then verifies yesterday.
-# Started by archiver-daily.timer. Set --since to the first day the recorder ran.
+# Compacts every finished day not yet compacted, deletes raw market data older than
+# raw_retention, then verifies yesterday. Started by archiver-daily.timer.
+# Logs: journalctl -u archiver-daily
 [Unit]
 Description=Polymarket archiver daily compaction and verification
 
@@ -8,7 +9,12 @@ Type=oneshot
 User=archiver
 Group=archiver
 WorkingDirectory=/var/lib/archiver
-ExecStart=/usr/local/bin/archiver compact --config /etc/archiver/config.toml --since 2026-10-30
+ExecStart=/usr/local/bin/archiver compact --all --config /etc/archiver/config.toml
 ExecStart=/usr/local/bin/archiver verify --config /etc/archiver/config.toml
 Nice=10
 IOSchedulingClass=idle
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/archiver

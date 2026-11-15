@@ -1,0 +1,14 @@
+# Runs healthcheck.sh, which alerts when `archiver status` reports a problem. Started by
+# archiver-health.timer. A failed run also shows in `systemctl --failed`.
+[Unit]
+Description=Polymarket archiver health check
+
+[Service]
+Type=oneshot
+User=archiver
+Group=archiver
+ExecStart=/usr/local/bin/archiver-healthcheck
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true

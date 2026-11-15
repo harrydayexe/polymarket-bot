@@ -23,6 +23,7 @@ archive/
 - A file being written ends in `.jsonl.open` and is locked (`flock`) by the process writing it. It is renamed to `.jsonl` 10 s after its hour (or day) ends, or when the run stops. Readers must ignore `.open` files. After a crash, the next start renames them; their last line may be cut off.
 - Finished `raw/` files are compressed to `.jsonl.zst` (zstd) in the background soon after they close. If both `x.jsonl` and `x.jsonl.zst` exist, the `.zst` is complete and the plain file is a leftover. Control and market files stay uncompressed.
 - A record that reaches the writer after its hour's file has closed goes in a new file of that hour, `<run_id>-p2.jsonl`.
+- `archiver compact` deletes the `raw/` folders of days older than `raw_retention`, once the day's Parquet tables hold every one of their files. `control/` and `markets/` are never deleted.
 - The run ID is `r-YYYYMMDD-HHMM-xxxx` (start time plus a random suffix). Manual `archiver snapshot` runs get their own run ID.
 
 ## Lines
