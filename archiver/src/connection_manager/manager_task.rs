@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     clock::SharedClock,
     config::Config,
-    connection_manager::manager::ConnectionManager,
+    connection_manager::{manager::ConnectionManager, summary::ManagerPublisher},
     messages::{ConnectionManagerMsg, Record, SnapshotMsg},
     types::SystemRandom,
 };
@@ -32,6 +32,7 @@ pub async fn connection_manager_task(
     token: CancellationToken,
     config: Arc<Config>,
     clock: SharedClock,
+    publisher: ManagerPublisher,
 ) -> Result<()> {
     let (reports_tx, mut reports) = mpsc::unbounded_channel();
     let mut manager = ConnectionManager::new(
@@ -41,6 +42,7 @@ pub async fn connection_manager_task(
         write_queue,
         snapshots,
         reports_tx,
+        publisher,
     );
 
     let mut tick = time::interval(TICK_INTERVAL);
@@ -61,6 +63,10 @@ pub async fn connection_manager_task(
             Some(msg) = inbox.recv() => match msg {
                 ConnectionManagerMsg::TokenChanges(changes) => {
                     manager.apply_token_changes(changes).await
+                }
+                ConnectionManagerMsg::BooksSeen { tokens } => {
+                    manager.books_seen(&tokens);
+                    Ok(())
                 }
             },
 
@@ -92,6 +98,7 @@ mod tests {
         clock::SystemClock,
         connection_manager::{
             fake_server::{FakeServer, TIMEOUT},
+            summary::{ManagerWatch, manager_channels},
             types::{ConnAttemptId, ConnSlotId},
         },
         market_registry::token_changes::{MarketTokens, TokenChanges},
@@ -150,6 +157,7 @@ mod tests {
         registry: mpsc::Sender<ConnectionManagerMsg>,
         records: mpsc::Receiver<Record>,
         snapshots: mpsc::UnboundedReceiver<SnapshotMsg>,
+        watch: ManagerWatch,
         token: CancellationToken,
         task: JoinHandle<Result<()>>,
     }
@@ -175,6 +183,7 @@ mod tests {
             let (write_queue, records) = mpsc::channel(config.write_queue_capacity);
             let (snapshot_tx, snapshots) = mpsc::unbounded_channel();
             let token = CancellationToken::new();
+            let (publisher, watch) = manager_channels();
             let task = tokio::spawn(connection_manager_task(
                 inbox,
                 write_queue,
@@ -182,12 +191,14 @@ mod tests {
                 token.clone(),
                 Arc::new(config),
                 Arc::new(SystemClock),
+                publisher,
             ));
             Harness {
                 server,
                 registry,
                 records,
                 snapshots,
+                watch,
                 token,
                 task,
             }
@@ -284,6 +295,90 @@ mod tests {
                 .unwrap()
                 .expect("task failed");
         }
+    }
+
+    #[tokio::test]
+    async fn missing_books_are_requested_then_marked_unhealthy() {
+        let mut h = Harness::with(|c| c.missing_book_timeout = Duration::from_millis(300)).await;
+        let _conn = h.streaming(&[1]).await;
+        assert!(matches!(
+            h.snapshot().await,
+            SnapshotMsg::SnapshotRequest {
+                reason: SnapshotReason::Subscribe,
+                ..
+            }
+        ));
+
+        assert_eq!(
+            h.snapshot().await,
+            SnapshotMsg::SnapshotRequest {
+                tokens: tokens_of(&[1]),
+                reason: SnapshotReason::MissingBook,
+            }
+        );
+        let mut unhealthy = HashSet::new();
+        for _ in 0..2 {
+            match h.control().await.1 {
+                ControlBody::TokenUnhealthy { token, .. } => unhealthy.insert(token),
+                other => panic!("expected token_unhealthy, got {other:?}"),
+            };
+        }
+        assert_eq!(unhealthy, tokens_of(&[1]));
+        time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(h.watch.summary.borrow().tokens_unhealthy.len(), 2);
+
+        // A book clears it.
+        h.registry
+            .send(ConnectionManagerMsg::BooksSeen {
+                tokens: HashSet::from([yes(1)]),
+            })
+            .await
+            .unwrap();
+        time::sleep(Duration::from_millis(250)).await;
+        let summary = h.watch.summary.borrow().clone();
+        assert_eq!(summary.tokens_unhealthy.len(), 1);
+        assert_eq!(summary.tokens_unhealthy[0].token, no(1));
+        h.stop().await;
+    }
+
+    #[tokio::test]
+    async fn books_in_time_need_no_snapshot_and_the_summary_is_published() {
+        let mut h = Harness::with(|c| c.missing_book_timeout = Duration::from_millis(300)).await;
+        let conn = h.streaming(&[1]).await;
+        h.snapshot().await;
+        h.registry
+            .send(ConnectionManagerMsg::BooksSeen {
+                tokens: tokens_of(&[1]),
+            })
+            .await
+            .unwrap();
+        conn.send(r#"{"event_type":"anything"}"#);
+        let (_, _, recv_ts) = h.frame().await;
+        time::sleep(Duration::from_millis(800)).await;
+
+        while let Ok(msg) = h.snapshots.try_recv() {
+            assert!(
+                matches!(msg, SnapshotMsg::TokensTracked { .. }),
+                "unexpected {msg:?}"
+            );
+        }
+        assert!(h.records.try_recv().is_err(), "no token_unhealthy");
+
+        let summary = h.watch.summary.borrow().clone();
+        assert!(summary.tokens_unhealthy.is_empty());
+        assert_eq!(summary.tokens_tracked, 2);
+        assert_eq!(summary.open_gaps, 0);
+        assert_eq!(summary.last_message_at, Some(recv_ts));
+        assert_eq!(summary.connections.len(), 1);
+        assert_eq!(summary.connections[0].slot, slot(1));
+        assert_eq!(summary.connections[0].state, "streaming");
+        assert_eq!(summary.connections[0].tokens, 2);
+        assert_eq!(
+            **h.watch.tracked_tokens.borrow(),
+            vec![no(1), yes(1)],
+            "sorted"
+        );
+        h.stop().await;
     }
 
     #[tokio::test]

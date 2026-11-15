@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use std::sync::Arc;
 
 use tokio::{
-    sync::mpsc,
+    sync::{mpsc, watch},
     time::{self, Interval, MissedTickBehavior},
 };
 use tokio_util::sync::CancellationToken;
@@ -20,6 +20,16 @@ use crate::{
     messages::{ConnectionManagerMsg, ControlBody, Record, RegistryMsg},
 };
 
+/// Where the registry task sends what it finds.
+pub struct RegistryOutputs {
+    /// Tokens to subscribe and unsubscribe.
+    pub conn_mgr: mpsc::Sender<ConnectionManagerMsg>,
+    /// Market and control records.
+    pub write_queue: mpsc::Sender<Record>,
+    /// The time of the latest cycle whose listing was accepted, for the status file.
+    pub last_success: watch::Sender<Option<DateTime<Utc>>>,
+}
+
 /// Keep the set of tracked markets up to date until `token` is cancelled.
 ///
 /// # Errors
@@ -28,13 +38,17 @@ use crate::{
 /// current set is kept.
 pub async fn registry_task(
     inbox: mpsc::UnboundedReceiver<RegistryMsg>,
-    conn_mgr: mpsc::Sender<ConnectionManagerMsg>,
-    write_queue: mpsc::Sender<Record>,
+    outputs: RegistryOutputs,
     token: CancellationToken,
     client: Arc<impl APIClient>,
     config: Arc<Config>,
     clock: SharedClock,
 ) -> Result<()> {
+    let RegistryOutputs {
+        conn_mgr,
+        write_queue,
+        last_success,
+    } = outputs;
     let mut task = RegistryTask {
         registry: Registry::new(config.clone()),
         client,
@@ -42,6 +56,7 @@ pub async fn registry_task(
         write_queue,
         config,
         clock,
+        last_success,
     };
     task.run(inbox, token).await
 }
@@ -53,6 +68,7 @@ struct RegistryTask<C> {
     write_queue: mpsc::Sender<Record>,
     config: Arc<Config>,
     clock: SharedClock,
+    last_success: watch::Sender<Option<DateTime<Utc>>>,
 }
 
 impl<C: APIClient> RegistryTask<C> {
@@ -115,11 +131,14 @@ impl<C: APIClient> RegistryTask<C> {
         match planned {
             Ok(plan) => {
                 let applied = self.registry.apply_plan(plan, now);
+                self.last_success
+                    .send_replace(self.registry.last_success_at());
                 log_changes(&applied.tokens);
                 self.publish(applied, now).await
             }
             Err(CycleError::Rejected(e)) => {
                 tracing::warn!(error = %e, "Gamma response rejected, keeping current markets");
+                self.registry.note_rejected();
                 self.write(Record::Control {
                     recv_ts: now,
                     conn_id: None,
@@ -239,6 +258,7 @@ mod tests {
         inbox: mpsc::UnboundedSender<RegistryMsg>,
         conn_mgr: mpsc::Receiver<ConnectionManagerMsg>,
         writes: mpsc::Receiver<Record>,
+        last_success: watch::Receiver<Option<DateTime<Utc>>>,
         token: CancellationToken,
         task: JoinHandle<Result<()>>,
     }
@@ -251,14 +271,18 @@ mod tests {
         let (conn_tx, conn_mgr) = mpsc::channel(16);
         let (write_tx, writes) = mpsc::channel(16);
         let token = CancellationToken::new();
+        let (success_tx, last_success) = watch::channel(None);
         let clock = Arc::new(TokioClock::new(
             Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
         ));
 
         let task = tokio::spawn(registry_task(
             inbox_rx,
-            conn_tx,
-            write_tx,
+            RegistryOutputs {
+                conn_mgr: conn_tx,
+                write_queue: write_tx,
+                last_success: success_tx,
+            },
             token.clone(),
             gamma.clone(),
             Arc::new(Config::default()),
@@ -270,6 +294,7 @@ mod tests {
             inbox,
             conn_mgr,
             writes,
+            last_success,
             token,
             task,
         }
@@ -279,6 +304,7 @@ mod tests {
         async fn token_changes(&mut self) -> TokenChanges {
             match self.conn_mgr.recv().await {
                 Some(ConnectionManagerMsg::TokenChanges(changes)) => changes,
+                Some(other) => panic!("unexpected message: {other:?}"),
                 None => panic!("registry task ended"),
             }
         }
@@ -352,6 +378,28 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_listing_that_stays_short_is_accepted_after_a_few_cycles() {
+        let mut h = start(markets(&[1, 2, 3, 4]));
+        h.token_changes().await;
+        let first_success = *h.last_success.borrow();
+        assert!(first_success.is_some());
+
+        // All four are gone from the listing, and one new market has appeared.
+        h.gamma.set_open(markets(&[5]));
+        for _ in 0..3 {
+            h.next_cycle().await;
+            h.assert_no_token_changes().await;
+        }
+        assert_eq!(*h.last_success.borrow(), first_success);
+
+        h.next_cycle().await;
+        let changes = h.token_changes().await;
+        assert_eq!(changes.added.len(), 1);
+        assert!(changes.removed.is_empty());
+        assert!(*h.last_success.borrow() > first_success);
     }
 
     #[tokio::test(start_paused = true)]

@@ -1,0 +1,32 @@
+# The recorder. See the README's "Deploying" section for the full steps.
+# Logs: journalctl -u archiver -f
+[Unit]
+Description=Polymarket order book archiver
+Wants=network-online.target time-sync.target
+After=network-online.target time-sync.target
+# Keep restarting however often it fails (e.g. while Gamma is unreachable at startup).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=archiver
+Group=archiver
+WorkingDirectory=/var/lib/archiver
+ExecStart=/usr/local/bin/archiver run --config /etc/archiver/config.toml
+# A stop takes at most 15 s (connections closed, queue drained, files renamed); the
+# next start records a process_restart gap for anything lost if it is killed.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+# The recorder only needs the network and its archive. If archive_dir is not under
+# /var/lib/archiver, change ReadWritePaths in all three units to match.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/archiver
+
+[Install]
+WantedBy=multi-user.target

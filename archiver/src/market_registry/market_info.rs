@@ -4,12 +4,15 @@ use marcasite::{
     types::{ConditionId, EventId, TokenId},
 };
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::market_registry::token_changes::MarketTokens;
 
 /// A market as last seen on Gamma, reduced to the fields the archiver uses.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Serialised into `markets/` records, with times as microseconds since the epoch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MarketInfo {
     pub condition_id: ConditionId,
     pub question: String,
@@ -20,7 +23,9 @@ pub struct MarketInfo {
     /// Tag slugs.
     pub tags: Vec<String>,
     pub tokens: MarketTokens,
+    #[serde(with = "chrono::serde::ts_microseconds_option")]
     pub start_date: Option<DateTime<Utc>>,
+    #[serde(with = "chrono::serde::ts_microseconds_option")]
     pub end_date: Option<DateTime<Utc>>,
     pub active: bool,
     pub closed: bool,
@@ -29,6 +34,7 @@ pub struct MarketInfo {
     pub tick_size: Option<Decimal>,
     /// Part of a multi-outcome group.
     pub neg_risk: bool,
+    #[serde(with = "chrono::serde::ts_microseconds")]
     pub fetched_at: DateTime<Utc>,
 }
 

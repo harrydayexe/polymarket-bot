@@ -10,6 +10,12 @@ pub mod verify;
 
 use tokio_util::sync::CancellationToken;
 
+/// Ends a command with this exit code, after it has printed why (e.g. 3 from `status` when
+/// unhealthy, 1 from `check` when a check failed).
+#[derive(Debug, thiserror::Error)]
+#[error("exit code {0}")]
+pub struct Exit(pub u8);
+
 use crate::cli::{Cli, Commands};
 
 pub async fn dispatch(cli: Cli, token: CancellationToken) -> anyhow::Result<()> {
