@@ -17,3 +17,6 @@ target/
 
 # The default archive_dir, when the recorder is run from here
 /archive/
+
+# The docs directory.
+docs/
