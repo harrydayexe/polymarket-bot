@@ -526,4 +526,115 @@ mod tests {
         token.cancel();
         task.await.unwrap().unwrap();
     }
+
+    /// Every raw line in the archive with its stream, exactly as written except that the
+    /// values that change from run to run (receive times, sequence numbers, run IDs, wall-clock
+    /// times and the config hash) are masked. Lines are sorted, since tasks race to write them.
+    fn normalised_archive(root: &Path) -> String {
+        const VOLATILE: [&str; 9] = [
+            "recv_ts",
+            "seq",
+            "run_id",
+            "previous_run",
+            "start",
+            "end",
+            "since",
+            "fetched_at",
+            "config_hash",
+        ];
+
+        /// Replaces the value after each `"key":` (a number or a string; `null` is kept).
+        fn mask(line: &str) -> String {
+            let mut out = line.to_string();
+            for key in VOLATILE {
+                let pattern = format!("\"{key}\":");
+                let mut from = 0;
+                while let Some(found) = out[from..].find(&pattern) {
+                    let value_start = from + found + pattern.len();
+                    let rest = &out[value_start..];
+                    let len = if let Some(stripped) = rest.strip_prefix('"') {
+                        stripped.find('"').expect("closed string") + 2
+                    } else if rest.starts_with("null") {
+                        0
+                    } else {
+                        rest.find(|c: char| !(c.is_ascii_digit() || c == '-'))
+                            .unwrap_or(rest.len())
+                    };
+                    out.replace_range(
+                        value_start..value_start + len,
+                        if len == 0 { "" } else { "\"<masked>\"" },
+                    );
+                    from = value_start;
+                }
+            }
+            out
+        }
+
+        let today = chrono::Utc::now().date_naive();
+        let mut lines = vec![];
+        for date in [today.pred_opt().unwrap(), today] {
+            for stream in Stream::ALL {
+                for path in files_for_date(root, stream, date, false).unwrap() {
+                    for line in crate::archive::reader::read_lines(&path).unwrap() {
+                        let line = String::from_utf8(line.unwrap()).unwrap();
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+                        lines.push(format!("{stream:?} {}", mask(&line)));
+                    }
+                }
+            }
+        }
+        lines.sort();
+        lines.join("\n") + "\n"
+    }
+
+    /// The archive written by a short run has the same line format as the fixture recorded
+    /// before the shared code moved into `pm-core`. Set `UPDATE_FIXTURES=1` to re-record it
+    /// after a deliberate format change.
+    #[tokio::test]
+    async fn archive_format_matches_the_fixture() {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/archive_format.txt");
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = FakeServer::start().await;
+        let (token, task) = start(config(dir.path(), &server));
+
+        let mut conn = server.accept().await;
+        conn.recv_json().await;
+        conn.send(
+            r#"{"event_type":"book","asset_id":"1111","market":"0x01","timestamp":"1757908892351",
+                "hash":"h1","bids":[{"price":"0.48","size":"30"}],
+                "asks":[{"price":"0.52","size":"12.5"}],"tick_size":"0.01"}"#,
+        );
+        conn.send(
+            r#"[{"event_type":"price_change","market":"0x01","timestamp":"1757908892352",
+                "price_changes":[{"asset_id":"1111","price":"0.48","size":"0","side":"BUY",
+                "hash":"h2","best_bid":"","best_ask":"0.52"}]},
+               {"event_type":"last_trade_price","asset_id":"1111","market":"0x01",
+                "price":"0.52","size":"5","side":"BUY","fee_rate_bps":"0",
+                "timestamp":"1757908892353","transaction_hash":"0xabc"}]"#,
+        );
+        conn.send(
+            r#"{"event_type":"tick_size_change","asset_id":"1111","market":"0x01",
+                "old_tick_size":"0.01","new_tick_size":"0.001","timestamp":"1757908892354"}"#,
+        );
+        conn.send(r#"{"event_type":"something_new","x":1}"#);
+        // Let the frames, the subscribe snapshot and a status write happen.
+        tokio::time::sleep(Duration::from_millis(3000)).await;
+        token.cancel();
+        tokio::time::timeout(SHUTDOWN_LIMIT, task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        let actual = normalised_archive(dir.path());
+        if std::env::var_os("UPDATE_FIXTURES").is_some() {
+            std::fs::create_dir_all(fixture.parent().unwrap()).unwrap();
+            std::fs::write(&fixture, &actual).unwrap();
+        }
+        let expected = std::fs::read_to_string(&fixture).expect("fixture recorded");
+        assert_eq!(actual, expected);
+    }
 }
