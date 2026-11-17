@@ -20,5 +20,6 @@ Prefer these recipes over the raw underlying commands.
 | Module | Location | Example |
 |---|---|---|
 | `archiver` | `archiver/` | `just archiver test` |
+| `pm-core` | `pm-core/` | `just pm-core build` |
 
 Each module directory has its own AGENTS.md with module-specific commands. When adding an app, add a `mod <name>` to the root justfile and wire its recipes into the root `ci`, `test`, `lint` and `fmt` recipes.
