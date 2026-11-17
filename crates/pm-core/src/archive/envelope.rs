@@ -24,11 +24,11 @@ use marcasite::{types::TokenId, ws::MarketEvent};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    archive::layout::Stream,
-    connection_manager::types::ConnAttemptId,
-    market_registry::{market_info::MarketInfo, registry::MarketChange},
-    messages::{ControlBody, Record, SnapshotReason},
-    types::RunId,
+    archive::{
+        layout::Stream,
+        record::{ConnAttemptId, ControlBody, Record, RunId, SnapshotReason},
+    },
+    market::{market_info::MarketInfo, registry::MarketChange},
 };
 
 impl Record {
@@ -175,8 +175,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        connection_manager::types::ConnSlotId, market_registry::token_changes::MarketTokens,
-        messages::GapReason,
+        archive::record::{ConnSlotId, GapReason},
+        market::token_changes::MarketTokens,
     };
 
     fn ts() -> DateTime<Utc> {
@@ -210,7 +210,7 @@ mod tests {
     }
 
     /// One example of every market channel message, shaped like the live stream.
-    pub(crate) fn sample_events() -> Vec<Value> {
+    fn sample_events() -> Vec<Value> {
         vec![
             json!({"event_type":"book","asset_id":"111","market":"0xabc",
                 "bids":[{"price":"0.48","size":"30.5"},{"price":"0.49","size":"20"}],

@@ -198,7 +198,8 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
-    use crate::{book::tests::t, connection_manager::types::ConnSlotId, messages::GapReason};
+    use crate::{connection_manager::types::ConnSlotId, messages::GapReason};
+    use pm_core::test_util::t;
 
     fn record(run: &str, seq: u64, ms: i64, body: ControlBody) -> StoredRecord {
         StoredRecord {

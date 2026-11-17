@@ -7,7 +7,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::market_registry::token_changes::MarketTokens;
+use crate::market::token_changes::MarketTokens;
 
 /// A market as last seen on Gamma, reduced to the fields the archiver uses.
 ///
@@ -103,45 +103,11 @@ impl MarketInfo {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-
-    pub const YES: &str = "111";
-    pub const NO: &str = "222";
-
-    pub fn condition_id(n: u8) -> String {
-        format!("0x{n:064x}")
-    }
-
-    /// A Gamma market that parses and qualifies under the default config, with fields overridden
-    /// by `overrides`. A `null` override removes the field.
-    pub fn gamma_market(n: u8, overrides: Value) -> Market {
-        let mut market = json!({
-            "conditionId": condition_id(n),
-            "question": format!("Question {n}?"),
-            "slug": format!("question-{n}"),
-            "outcomes": "[\"Yes\", \"No\"]",
-            "clobTokenIds": format!("[\"{n}{YES}\", \"{n}{NO}\"]"),
-            "active": true,
-            "closed": false,
-            "acceptingOrders": true,
-            "liquidityNum": 5000,
-            "orderPriceMinTickSize": 0.01,
-            "tags": [{ "slug": "politics" }],
-        });
-        for (key, value) in overrides.as_object().expect("overrides must be an object") {
-            match value {
-                Value::Null => market.as_object_mut().unwrap().remove(key),
-                _ => market
-                    .as_object_mut()
-                    .unwrap()
-                    .insert(key.clone(), value.clone()),
-            };
-        }
-        serde_json::from_value(market).expect("fixture should deserialize")
-    }
+    use crate::test_util::{NO, YES, gamma_market};
 
     fn parse(overrides: Value) -> Result<MarketInfo, MarketParseError> {
         MarketInfo::from_gamma(gamma_market(1, overrides), Utc::now())

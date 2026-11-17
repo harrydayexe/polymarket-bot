@@ -6,21 +6,7 @@ use tokio::time::Instant;
 
 use crate::messages::{ControlBody, GapReason, SnapshotReason};
 
-marcasite_core::string_id! {
-    /// Identifier for a connection slot, stable across reconnects.
-    pub struct ConnSlotId;
-}
-
-marcasite_core::string_id! {
-    /// Slot + attempt number, new for each connection attempt.
-    pub struct ConnAttemptId;
-}
-
-impl ConnAttemptId {
-    pub fn create(slot: ConnSlotId, seq: u64) -> Self {
-        ConnAttemptId::new(format!("{}-{}", slot, seq))
-    }
-}
+pub use pm_core::archive::record::{ConnAttemptId, ConnSlotId};
 
 /// Differs from the design doc because marcasite's market channel does part of the work:
 ///

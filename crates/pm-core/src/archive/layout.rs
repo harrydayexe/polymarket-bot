@@ -2,13 +2,13 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Datelike, NaiveDate, TimeDelta, Timelike, Utc};
 
-use crate::types::RunId;
+use crate::archive::record::RunId;
 
 /// Suffix of a file still being written. The offline commands never read these.
 pub const OPEN_SUFFIX: &str = ".jsonl.open";
 /// Suffix of a finished file.
 pub const DONE_SUFFIX: &str = ".jsonl";
-/// Suffix of a finished file once compressed (market data only, see [super::compress]).
+/// Suffix of a finished file once compressed (market data only; the archiver compresses them).
 pub const ZST_SUFFIX: &str = ".jsonl.zst";
 
 /// Folder of the state files, relative to the archive root.

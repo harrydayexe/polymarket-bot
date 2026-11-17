@@ -4,7 +4,7 @@ use crate::cli::CommonArgs;
 use crate::client::{APIClient, MarcasiteClient};
 use crate::clock::{Clock, SystemClock};
 use crate::config::Config;
-use crate::market_registry::selection::{parse_markets, select};
+use crate::market_registry::selection::{parse_markets, qualifies};
 
 /// Print the markets the registry would select right now, with counts. Changes nothing.
 pub async fn execute(args: CommonArgs, token: CancellationToken) -> anyhow::Result<()> {
@@ -21,9 +21,10 @@ pub async fn execute(args: CommonArgs, token: CancellationToken) -> anyhow::Resu
 
     let fetched = markets.len();
     let (parsed, skipped) = parse_markets(markets, SystemClock.now());
+    let rules = config.selection_rules();
     let mut selected: Vec<_> = parsed
         .iter()
-        .filter(|market| select(market, &config))
+        .filter(|market| qualifies(market, &rules))
         .collect();
     selected.sort_by(|a, b| a.question.cmp(&b.question));
 

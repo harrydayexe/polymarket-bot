@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+pm-core = { path = "../crates/pm-core" }
 anyhow = "1.0.104"
 arrow-array = "60.1.0"
 arrow-schema = "60.1.0"
@@ -46,11 +47,8 @@ url = { version = "2.5.8", features = ["serde"] }
 zstd = "0.14.3"
 
 [dev-dependencies]
+pm-core = { path = "../crates/pm-core", features = ["test-util"] }
 tokio-tungstenite = "0.30.0"
 tokio = { version = "1.53.1", features = ["test-util"] }
 tempfile = "3.27.0"
 
-[profile.release]
-# A panic anywhere stops the process, so the supervisor restarts it and the next start
-# records the gap, rather than a task dying silently while the rest keeps running.
-panic = "abort"

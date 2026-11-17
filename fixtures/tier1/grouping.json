@@ -1,0 +1,802 @@
+{
+  "schema": "tier1-grouping.v1",
+  "description": "Golden cases for \u00a73.2 (normalising a print to a buy) and \u00a73.3 (grouping prints) of the Phase 1 spec. Shared by the Rust grouper (pm-core) and the Python research code.",
+  "conventions": {
+    "times": "Integer microseconds since the Unix epoch, UTC.",
+    "decimals": "Strings; compare as decimal numbers, not as text.",
+    "prints": "In arrival order. Feed each to the grouper at its recv_ts; after the last, close every open group.",
+    "groups": "In the order they close: by closed_at, then seq. `prints` are indices into the case's prints; dropped duplicates appear in no group.",
+    "seq": "Groups are numbered from 0 in the order they open.",
+    "closed_at": "Receive time of the group's last join plus the window.",
+    "vwap": "notional / shares, rounded half-even to 6 places."
+  },
+  "market": {
+    "condition_id": "0xc1",
+    "yes": "1111",
+    "no": "1222"
+  },
+  "config": {
+    "window_ms": 250,
+    "dedup_retention_ms": 60000
+  },
+  "cases": [
+    {
+      "name": "single_buy",
+      "note": "One print is one group, closed 250 ms of receive time after it arrived.",
+      "prints": [
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.20",
+          "size": "100",
+          "tx": "0xa1",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000050000
+        }
+      ],
+      "expected": {
+        "groups": [
+          {
+            "seq": 0,
+            "prints": [
+              0
+            ],
+            "outcome": "Yes",
+            "bought_token": "1111",
+            "tx_hashes": [
+              "0xa1"
+            ],
+            "dup_cross_token": 0,
+            "direction_conflict": 0,
+            "flags": [],
+            "shares": "100",
+            "notional": "20",
+            "vwap": "0.2",
+            "closed_at": 1790000000300000
+          }
+        ],
+        "late_cross_token_dups": 0
+      }
+    },
+    {
+      "name": "sell_of_yes_is_buy_of_no",
+      "note": "SELL YES at 0.82 normalises to a buy of NO at 0.18.",
+      "prints": [
+        {
+          "token": "1111",
+          "side": "SELL",
+          "price": "0.82",
+          "size": "100",
+          "tx": "0xb1",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000050000
+        }
+      ],
+      "expected": {
+        "groups": [
+          {
+            "seq": 0,
+            "prints": [
+              0
+            ],
+            "outcome": "No",
+            "bought_token": "1222",
+            "tx_hashes": [
+              "0xb1"
+            ],
+            "dup_cross_token": 0,
+            "direction_conflict": 0,
+            "flags": [],
+            "shares": "100",
+            "notional": "18",
+            "vwap": "0.18",
+            "closed_at": 1790000000300000
+          }
+        ],
+        "late_cross_token_dups": 0
+      }
+    },
+    {
+      "name": "sweep_six_prints_same_tx",
+      "note": "Six fills of one match: one group.",
+      "prints": [
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.20",
+          "size": "10",
+          "tx": "0xc1",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000050000
+        },
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.21",
+          "size": "10",
+          "tx": "0xc1",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000050000
+        },
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.22",
+          "size": "10",
+          "tx": "0xc1",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000050000
+        },
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.23",
+          "size": "10",
+          "tx": "0xc1",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000050000
+        },
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.24",
+          "size": "10",
+          "tx": "0xc1",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000050000
+        },
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.25",
+          "size": "10",
+          "tx": "0xc1",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000050000
+        }
+      ],
+      "expected": {
+        "groups": [
+          {
+            "seq": 0,
+            "prints": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5
+            ],
+            "outcome": "Yes",
+            "bought_token": "1111",
+            "tx_hashes": [
+              "0xc1"
+            ],
+            "dup_cross_token": 0,
+            "direction_conflict": 0,
+            "flags": [],
+            "shares": "60",
+            "notional": "13.5",
+            "vwap": "0.225",
+            "closed_at": 1790000000300000
+          }
+        ],
+        "late_cross_token_dups": 0
+      }
+    },
+    {
+      "name": "rising_200ms_different_tx",
+      "note": "Same outcome, 200 ms apart, price rises: one group.",
+      "prints": [
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.20",
+          "size": "100",
+          "tx": "0xd1",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000050000
+        },
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.22",
+          "size": "50",
+          "tx": "0xd2",
+          "exchange_ts": 1790000000200000,
+          "recv_ts": 1790000000250000
+        }
+      ],
+      "expected": {
+        "groups": [
+          {
+            "seq": 0,
+            "prints": [
+              0,
+              1
+            ],
+            "outcome": "Yes",
+            "bought_token": "1111",
+            "tx_hashes": [
+              "0xd1",
+              "0xd2"
+            ],
+            "dup_cross_token": 0,
+            "direction_conflict": 0,
+            "flags": [],
+            "shares": "150",
+            "notional": "31",
+            "vwap": "0.206667",
+            "closed_at": 1790000000500000
+          }
+        ],
+        "late_cross_token_dups": 0
+      }
+    },
+    {
+      "name": "falling_200ms",
+      "note": "Price falls: two groups.",
+      "prints": [
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.20",
+          "size": "100",
+          "tx": "0xe1",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000050000
+        },
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.18",
+          "size": "50",
+          "tx": "0xe2",
+          "exchange_ts": 1790000000200000,
+          "recv_ts": 1790000000250000
+        }
+      ],
+      "expected": {
+        "groups": [
+          {
+            "seq": 0,
+            "prints": [
+              0
+            ],
+            "outcome": "Yes",
+            "bought_token": "1111",
+            "tx_hashes": [
+              "0xe1"
+            ],
+            "dup_cross_token": 0,
+            "direction_conflict": 0,
+            "flags": [],
+            "shares": "100",
+            "notional": "20",
+            "vwap": "0.2",
+            "closed_at": 1790000000300000
+          },
+          {
+            "seq": 1,
+            "prints": [
+              1
+            ],
+            "outcome": "Yes",
+            "bought_token": "1111",
+            "tx_hashes": [
+              "0xe2"
+            ],
+            "dup_cross_token": 0,
+            "direction_conflict": 0,
+            "flags": [],
+            "shares": "50",
+            "notional": "9",
+            "vwap": "0.18",
+            "closed_at": 1790000000500000
+          }
+        ],
+        "late_cross_token_dups": 0
+      }
+    },
+    {
+      "name": "apart_300ms",
+      "note": "300 ms apart: two groups (the first has closed by receive time too).",
+      "prints": [
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.20",
+          "size": "100",
+          "tx": "0xf1",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000050000
+        },
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.22",
+          "size": "50",
+          "tx": "0xf2",
+          "exchange_ts": 1790000000300000,
+          "recv_ts": 1790000000350000
+        }
+      ],
+      "expected": {
+        "groups": [
+          {
+            "seq": 0,
+            "prints": [
+              0
+            ],
+            "outcome": "Yes",
+            "bought_token": "1111",
+            "tx_hashes": [
+              "0xf1"
+            ],
+            "dup_cross_token": 0,
+            "direction_conflict": 0,
+            "flags": [],
+            "shares": "100",
+            "notional": "20",
+            "vwap": "0.2",
+            "closed_at": 1790000000300000
+          },
+          {
+            "seq": 1,
+            "prints": [
+              1
+            ],
+            "outcome": "Yes",
+            "bought_token": "1111",
+            "tx_hashes": [
+              "0xf2"
+            ],
+            "dup_cross_token": 0,
+            "direction_conflict": 0,
+            "flags": [],
+            "shares": "50",
+            "notional": "11",
+            "vwap": "0.22",
+            "closed_at": 1790000000600000
+          }
+        ],
+        "late_cross_token_dups": 0
+      }
+    },
+    {
+      "name": "exactly_250ms_equal_price_joins",
+      "note": "The exchange-time gap and the price rule are inclusive.",
+      "prints": [
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.20",
+          "size": "100",
+          "tx": "0x91",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000050000
+        },
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.20",
+          "size": "100",
+          "tx": "0x92",
+          "exchange_ts": 1790000000250000,
+          "recv_ts": 1790000000290000
+        }
+      ],
+      "expected": {
+        "groups": [
+          {
+            "seq": 0,
+            "prints": [
+              0,
+              1
+            ],
+            "outcome": "Yes",
+            "bought_token": "1111",
+            "tx_hashes": [
+              "0x91",
+              "0x92"
+            ],
+            "dup_cross_token": 0,
+            "direction_conflict": 0,
+            "flags": [],
+            "shares": "200",
+            "notional": "40",
+            "vwap": "0.2",
+            "closed_at": 1790000000540000
+          }
+        ],
+        "late_cross_token_dups": 0
+      }
+    },
+    {
+      "name": "receive_quiet_period_closes",
+      "note": "Within 250 ms of exchange time, but arrives exactly 250 ms of receive time after the last join: the group has closed.",
+      "prints": [
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.20",
+          "size": "100",
+          "tx": "0x101",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000050000
+        },
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.21",
+          "size": "100",
+          "tx": "0x102",
+          "exchange_ts": 1790000000100000,
+          "recv_ts": 1790000000300000
+        }
+      ],
+      "expected": {
+        "groups": [
+          {
+            "seq": 0,
+            "prints": [
+              0
+            ],
+            "outcome": "Yes",
+            "bought_token": "1111",
+            "tx_hashes": [
+              "0x101"
+            ],
+            "dup_cross_token": 0,
+            "direction_conflict": 0,
+            "flags": [],
+            "shares": "100",
+            "notional": "20",
+            "vwap": "0.2",
+            "closed_at": 1790000000300000
+          },
+          {
+            "seq": 1,
+            "prints": [
+              1
+            ],
+            "outcome": "Yes",
+            "bought_token": "1111",
+            "tx_hashes": [
+              "0x102"
+            ],
+            "dup_cross_token": 0,
+            "direction_conflict": 0,
+            "flags": [],
+            "shares": "100",
+            "notional": "21",
+            "vwap": "0.21",
+            "closed_at": 1790000000550000
+          }
+        ],
+        "late_cross_token_dups": 0
+      }
+    },
+    {
+      "name": "other_outcome_within_window",
+      "note": "A buy of the other outcome opens its own group.",
+      "prints": [
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.20",
+          "size": "100",
+          "tx": "0x111",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000050000
+        },
+        {
+          "token": "1222",
+          "side": "BUY",
+          "price": "0.80",
+          "size": "100",
+          "tx": "0x112",
+          "exchange_ts": 1790000000100000,
+          "recv_ts": 1790000000150000
+        }
+      ],
+      "expected": {
+        "groups": [
+          {
+            "seq": 0,
+            "prints": [
+              0
+            ],
+            "outcome": "Yes",
+            "bought_token": "1111",
+            "tx_hashes": [
+              "0x111"
+            ],
+            "dup_cross_token": 0,
+            "direction_conflict": 0,
+            "flags": [],
+            "shares": "100",
+            "notional": "20",
+            "vwap": "0.2",
+            "closed_at": 1790000000300000
+          },
+          {
+            "seq": 1,
+            "prints": [
+              1
+            ],
+            "outcome": "No",
+            "bought_token": "1222",
+            "tx_hashes": [
+              "0x112"
+            ],
+            "dup_cross_token": 0,
+            "direction_conflict": 0,
+            "flags": [],
+            "shares": "100",
+            "notional": "80",
+            "vwap": "0.8",
+            "closed_at": 1790000000400000
+          }
+        ],
+        "late_cross_token_dups": 0
+      }
+    },
+    {
+      "name": "same_tx_on_yes_and_no",
+      "note": "One match reported on both tokens: only the first-seen token's prints are kept.",
+      "prints": [
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.40",
+          "size": "10",
+          "tx": "0x121",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000050000
+        },
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.41",
+          "size": "10",
+          "tx": "0x121",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000050000
+        },
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.42",
+          "size": "10",
+          "tx": "0x121",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000050000
+        },
+        {
+          "token": "1222",
+          "side": "SELL",
+          "price": "0.60",
+          "size": "10",
+          "tx": "0x121",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000060000
+        },
+        {
+          "token": "1222",
+          "side": "SELL",
+          "price": "0.59",
+          "size": "10",
+          "tx": "0x121",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000060000
+        },
+        {
+          "token": "1222",
+          "side": "SELL",
+          "price": "0.58",
+          "size": "10",
+          "tx": "0x121",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000060000
+        }
+      ],
+      "expected": {
+        "groups": [
+          {
+            "seq": 0,
+            "prints": [
+              0,
+              1,
+              2
+            ],
+            "outcome": "Yes",
+            "bought_token": "1111",
+            "tx_hashes": [
+              "0x121"
+            ],
+            "dup_cross_token": 3,
+            "direction_conflict": 0,
+            "flags": [],
+            "shares": "30",
+            "notional": "12.3",
+            "vwap": "0.41",
+            "closed_at": 1790000000300000
+          }
+        ],
+        "late_cross_token_dups": 0
+      }
+    },
+    {
+      "name": "cross_token_direction_conflict",
+      "note": "The sibling token's print of the same tx normalises to the other outcome: dropped, counted and flagged.",
+      "prints": [
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.30",
+          "size": "10",
+          "tx": "0x131",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000050000
+        },
+        {
+          "token": "1222",
+          "side": "BUY",
+          "price": "0.70",
+          "size": "10",
+          "tx": "0x131",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000060000
+        }
+      ],
+      "expected": {
+        "groups": [
+          {
+            "seq": 0,
+            "prints": [
+              0
+            ],
+            "outcome": "Yes",
+            "bought_token": "1111",
+            "tx_hashes": [
+              "0x131"
+            ],
+            "dup_cross_token": 1,
+            "direction_conflict": 1,
+            "flags": [
+              "direction_conflict"
+            ],
+            "shares": "10",
+            "notional": "3",
+            "vwap": "0.3",
+            "closed_at": 1790000000300000
+          }
+        ],
+        "late_cross_token_dups": 0
+      }
+    },
+    {
+      "name": "tx_rule_beats_falling_price",
+      "note": "A later fill of the first group's tx joins it although its price is lower; groups are emitted in closing order.",
+      "prints": [
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.20",
+          "size": "10",
+          "tx": "0x141",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000050000
+        },
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.18",
+          "size": "10",
+          "tx": "0x142",
+          "exchange_ts": 1790000000050000,
+          "recv_ts": 1790000000080000
+        },
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.15",
+          "size": "10",
+          "tx": "0x141",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000090000
+        }
+      ],
+      "expected": {
+        "groups": [
+          {
+            "seq": 1,
+            "prints": [
+              1
+            ],
+            "outcome": "Yes",
+            "bought_token": "1111",
+            "tx_hashes": [
+              "0x142"
+            ],
+            "dup_cross_token": 0,
+            "direction_conflict": 0,
+            "flags": [],
+            "shares": "10",
+            "notional": "1.8",
+            "vwap": "0.18",
+            "closed_at": 1790000000330000
+          },
+          {
+            "seq": 0,
+            "prints": [
+              0,
+              2
+            ],
+            "outcome": "Yes",
+            "bought_token": "1111",
+            "tx_hashes": [
+              "0x141"
+            ],
+            "dup_cross_token": 0,
+            "direction_conflict": 0,
+            "flags": [],
+            "shares": "20",
+            "notional": "3.5",
+            "vwap": "0.175",
+            "closed_at": 1790000000340000
+          }
+        ],
+        "late_cross_token_dups": 0
+      }
+    },
+    {
+      "name": "late_cross_token_duplicate",
+      "note": "A sibling-token duplicate arriving after its group closed is still dropped, and counted on the grouper.",
+      "prints": [
+        {
+          "token": "1111",
+          "side": "BUY",
+          "price": "0.30",
+          "size": "10",
+          "tx": "0x151",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000050000
+        },
+        {
+          "token": "1222",
+          "side": "SELL",
+          "price": "0.70",
+          "size": "10",
+          "tx": "0x151",
+          "exchange_ts": 1790000000000000,
+          "recv_ts": 1790000000400000
+        }
+      ],
+      "expected": {
+        "groups": [
+          {
+            "seq": 0,
+            "prints": [
+              0
+            ],
+            "outcome": "Yes",
+            "bought_token": "1111",
+            "tx_hashes": [
+              "0x151"
+            ],
+            "dup_cross_token": 0,
+            "direction_conflict": 0,
+            "flags": [],
+            "shares": "10",
+            "notional": "3",
+            "vwap": "0.3",
+            "closed_at": 1790000000300000
+          }
+        ],
+        "late_cross_token_dups": 1
+      }
+    }
+  ]
+}

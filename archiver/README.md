@@ -17,11 +17,11 @@ It talks to Polymarket through the [marcasite](https://crates.io/crates/marcasit
 
 ## Building
 
-Requires a Rust toolchain (edition 2024) and [just](https://just.systems). From this directory:
+Requires a Rust toolchain (edition 2024) and [just](https://just.systems). The archiver is a member of the repository's Cargo workspace and uses the shared `pm-core` crate (`../crates/pm-core`), so build output goes to the workspace's `target/` folder at the repo root. From this directory:
 
 ```sh
-just build           # debug binary at target/debug/archiver
-just build-release   # optimised binary at target/release/archiver
+just build           # debug binary at ../target/debug/archiver
+just build-release   # optimised binary at ../target/release/archiver
 just test            # run the tests
 just ci              # format check, clippy and tests
 ```
@@ -63,7 +63,7 @@ Both targets run the same binary and the same three jobs: the recorder (`archive
 For trying it out and for short recordings. A laptop that sleeps or changes network just leaves recorded gaps; the recorder reconnects by itself.
 
 1. Install a Rust toolchain ([rustup](https://rustup.rs)) and a C compiler (Xcode command line tools on macOS, `build-essential` on Debian/Ubuntu). [just](https://just.systems) is optional: every recipe is a one-line `cargo` command.
-2. Build: `cargo build --release` in this directory. The binary is `target/release/archiver`.
+2. Build: `cargo build --release` in this directory (of a clone of the whole repository). The binary is `../target/release/archiver`.
 3. Copy `config.toml` somewhere of your own, e.g. `~/polymarket/config.toml`, and set `archive_dir` to an absolute path such as `/home/you/polymarket/archive`. Choose `min_liquidity_usd` (see Sizing) and lower `min_free_disk_gb` if the disk is small.
 4. `archiver check -c ~/polymarket/config.toml`. Every line should say `PASS`.
 5. Start recording in a terminal you can leave open (`tmux` or `screen` help): `archiver run -c ~/polymarket/config.toml`. Stop it with Ctrl+C; it finishes its files and exits within 15 s.
@@ -77,11 +77,11 @@ To have it start with the laptop on Linux, use the units below as user units (`~
 Any small Linux machine with systemd works: the recorder needs about 100 MB of memory and a few percent of one core. Disk is what to size (see Sizing). Building can need a couple of GB of memory, so on a smaller machine either add swap for the build, or build on another Linux machine of the same architecture and copy the binary over.
 
 ```sh
-# 1. Build and install (on the server, in this directory)
+# 1. Build and install (on the server, in this directory of a clone of the whole repository)
 sudo apt-get install -y build-essential ca-certificates   # Debian/Ubuntu
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 cargo build --release
-sudo install -m 755 target/release/archiver /usr/local/bin/archiver
+sudo install -m 755 ../target/release/archiver /usr/local/bin/archiver
 sudo install -m 755 deploy/healthcheck.sh /usr/local/bin/archiver-healthcheck
 
 # 2. A user, the archive folder and the config

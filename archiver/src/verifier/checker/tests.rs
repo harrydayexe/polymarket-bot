@@ -8,10 +8,10 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::{
-    book::tests::t,
     connection_manager::types::ConnSlotId,
     messages::{ControlBody, GapReason, SnapshotReason},
 };
+use pm_core::test_util::t;
 
 /// Exchange times in the tests are milliseconds after this.
 pub(crate) const T0: i64 = 1_790_348_400_000;

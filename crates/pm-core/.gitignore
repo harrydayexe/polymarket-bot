@@ -15,5 +15,3 @@ target/
 
 # End of https://www.toptal.com/developers/gitignore/api/rust
 
-# The default archive_dir, when the recorder is run from here
-/archive/

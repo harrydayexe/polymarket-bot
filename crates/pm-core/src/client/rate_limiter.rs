@@ -1,6 +1,11 @@
-use std::time::Duration;
+//! Request budgets: [RateLimiter], a pure token bucket, and [SharedRateLimiter], an async
+//! handle that tasks sharing one budget wait on.
 
-use tokio::time::Instant;
+use std::{sync::Arc, time::Duration};
+
+use tokio::{sync::Mutex, time::Instant};
+
+use crate::{invariant, invariant::InvariantViolation};
 
 /// A token bucket: holds up to `capacity` permits, gains `per_second` permits a second, and
 /// each request spends one. (The permits are unrelated to market tokens; the name is standard.)
@@ -47,6 +52,55 @@ impl RateLimiter {
         }
         self.full_at = self.full_at.max(now) + self.per_permit;
         true
+    }
+}
+
+/// One request budget shared by several tasks: each waits in [acquire](Self::acquire) until
+/// the bucket has a permit. Cheap to clone; clones share the budget. Waiters are served in
+/// the order they called `acquire` (tokio's mutex is fair). Uses tokio time, so it can be
+/// tested on paused time.
+#[derive(Debug, Clone)]
+pub struct SharedRateLimiter {
+    limiter: Arc<Mutex<RateLimiter>>,
+}
+
+impl SharedRateLimiter {
+    /// A full bucket of `capacity` permits, refilled at `per_second`.
+    ///
+    /// # Errors
+    ///
+    /// If `capacity` or `per_second` is 0.
+    pub fn new(capacity: u32, per_second: u32) -> Result<Self, InvariantViolation> {
+        invariant!(
+            capacity > 0,
+            Err(InvariantViolation("rate limiter capacity is positive"))
+        );
+        invariant!(
+            per_second > 0,
+            Err(InvariantViolation("rate limiter rate is positive"))
+        );
+        Ok(Self {
+            limiter: Arc::new(Mutex::new(RateLimiter::new(
+                capacity,
+                per_second,
+                Instant::now(),
+            ))),
+        })
+    }
+
+    /// Waits for a permit and spends it. Returns when the permit was granted.
+    pub async fn acquire(&self) -> Instant {
+        // Holding the lock while sleeping keeps waiters in order.
+        let mut limiter = self.limiter.lock().await;
+        loop {
+            let now = Instant::now();
+            let ready = limiter.ready_at(now);
+            if limiter.try_acquire(now) {
+                return now;
+            }
+            invariant!(ready > now, now);
+            tokio::time::sleep_until(ready).await;
+        }
     }
 }
 
@@ -104,5 +158,37 @@ mod tests {
         }
         // 3 at once, then 97 at 7 a second.
         assert_eq!(now, t0 + (Duration::from_secs(1) / 7) * 97);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_shared_budget_spreads_queued_requests() {
+        // C2: 100 backfill requests queued against 10 a second.
+        let limiter = SharedRateLimiter::new(10, 10).unwrap();
+        let start = Instant::now();
+        let tasks: Vec<_> = (0..100)
+            .map(|_| {
+                let limiter = limiter.clone();
+                tokio::spawn(async move { limiter.acquire().await })
+            })
+            .collect();
+        let mut granted = vec![];
+        for task in tasks {
+            granted.push(task.await.unwrap());
+        }
+        granted.sort();
+        let last = *granted.last().unwrap() - start;
+        // 10 at once, then 90 at 10 a second.
+        assert_eq!(last, Duration::from_secs(9));
+        // The burst at once, then one every 100 ms.
+        assert!(granted[..10].iter().all(|at| *at == start));
+        for pair in granted[9..].windows(2) {
+            assert_eq!(pair[1] - pair[0], Duration::from_millis(100));
+        }
+    }
+
+    #[test]
+    fn shared_limiter_needs_a_budget() {
+        assert!(SharedRateLimiter::new(0, 1).is_err());
+        assert!(SharedRateLimiter::new(1, 0).is_err());
     }
 }

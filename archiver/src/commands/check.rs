@@ -15,7 +15,7 @@ use crate::{
     client::{APIClient, MarcasiteClient},
     commands::Exit,
     config::Config,
-    market_registry::selection::{parse_markets, select},
+    market_registry::selection::{parse_markets, qualifies},
 };
 
 /// Most the system clock may differ from the exchange's.
@@ -98,7 +98,8 @@ async fn gamma(config: &Config) -> Result<(String, Option<TokenId>)> {
     let client = MarcasiteClient::connect(config).await?;
     let markets = client.fetch_open_markets().await?;
     let (parsed, _) = parse_markets(markets, Utc::now());
-    let selected: Vec<_> = parsed.iter().filter(|m| select(m, config)).collect();
+    let rules = config.selection_rules();
+    let selected: Vec<_> = parsed.iter().filter(|m| qualifies(m, &rules)).collect();
     anyhow::ensure!(
         !selected.is_empty(),
         "reachable, but no market qualifies under the selection rules"

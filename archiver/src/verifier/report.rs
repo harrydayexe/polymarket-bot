@@ -242,7 +242,8 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::book::{BookSide, tests::t};
+    use crate::book::BookSide;
+    use pm_core::test_util::t;
 
     fn window(result: WindowResult) -> VerifyWindow {
         VerifyWindow {

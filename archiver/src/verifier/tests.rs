@@ -12,7 +12,6 @@ use crate::{
         envelope::encode,
         layout::{DONE_SUFFIX, FileKey, OPEN_SUFFIX, file_stem},
     },
-    book::tests::t,
     connection_manager::types::ConnAttemptId,
     messages::{ControlBody, Record, SnapshotReason},
     types::RunId,
@@ -21,6 +20,7 @@ use crate::{
         report::{NotCheckableReason, WindowResult},
     },
 };
+use pm_core::test_util::t;
 
 /// Writes records as the recorder would: one file per run and stream (and hour), lines in
 /// `seq` order.

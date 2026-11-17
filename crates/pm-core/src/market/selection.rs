@@ -1,10 +1,17 @@
 use chrono::{DateTime, Utc};
 use marcasite::{gamma::Market, types::ConditionId};
+use rust_decimal::Decimal;
 
-use crate::{
-    config::Config,
-    market_registry::market_info::{MarketInfo, MarketParseError},
-};
+use crate::market::market_info::{MarketInfo, MarketParseError};
+
+/// The rules a market must meet to join the universe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectionRules {
+    /// Gamma tag slugs; a market needs at least one of them.
+    pub category_tags: Vec<String>,
+    /// The liquidity floor, in USD.
+    pub min_liquidity_usd: Decimal,
+}
 
 /// A Gamma market that could not be parsed.
 #[derive(Debug)]
@@ -37,15 +44,15 @@ pub fn parse_markets(
 
 /// Check if a market meets the rules for *joining* the tracked set: a configured category tag, open
 /// and accepting orders, and liquidity at or above the floor.
-pub fn select(market: &MarketInfo, config: &Config) -> bool {
+pub fn qualifies(market: &MarketInfo, rules: &SelectionRules) -> bool {
     let in_category = market
         .tags
         .iter()
-        .any(|tag| config.category_tags.contains(tag));
+        .any(|tag| rules.category_tags.contains(tag));
     let tradable = market.active && !market.closed && market.accepting_orders;
     let liquid = market
         .liquidity_usd
-        .is_some_and(|liquidity| liquidity >= config.min_liquidity_usd);
+        .is_some_and(|liquidity| liquidity >= rules.min_liquidity_usd);
 
     in_category && tradable && liquid
 }
@@ -55,15 +62,15 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::market_registry::market_info::tests::gamma_market;
+    use crate::test_util::{gamma_market, registry_config};
 
     fn selected(overrides: serde_json::Value) -> bool {
         let info = MarketInfo::from_gamma(gamma_market(1, overrides), Utc::now()).unwrap();
-        select(&info, &Config::default())
+        qualifies(&info, &registry_config().selection)
     }
 
     #[test]
-    fn qualifies() {
+    fn a_matching_market_qualifies() {
         assert!(selected(json!({})));
     }
 

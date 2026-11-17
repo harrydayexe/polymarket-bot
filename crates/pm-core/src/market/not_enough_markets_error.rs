@@ -6,7 +6,7 @@ use thiserror::Error;
      ({last_accepted_count} last accepted)"
 )]
 pub struct NotEnoughMarketsError {
-    pub(super) fetched_count: u64,
-    pub(super) last_accepted_count: u64,
-    pub(super) threshold: u64,
+    pub fetched_count: u64,
+    pub last_accepted_count: u64,
+    pub threshold: u64,
 }

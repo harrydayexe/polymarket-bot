@@ -286,9 +286,9 @@ mod tests {
             reader::read_records,
         },
         connection_manager::fake_server::{FakeServer, TIMEOUT},
-        market_registry::market_info::tests::gamma_market,
         status::status_file::{StatusFile, TrackedTokensFile, read_json, write_json_atomic},
     };
+    use pm_core::test_util::gamma_market;
 
     struct FakeGamma(Vec<Market>);
 

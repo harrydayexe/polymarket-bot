@@ -1,6 +1,6 @@
 # Polymarket-Bot
 
-Polyglot monorepo. Each application lives in its own top-level directory with its own justfile, mounted as a module in the root justfile.
+Polyglot monorepo. Each application lives in its own top-level directory with its own justfile, mounted as a module in the root justfile. Rust code is one Cargo workspace (`Cargo.toml` at the root, members `archiver` and `crates/*`, one `Cargo.lock`, build output in `target/` at the root); shared Rust libraries live under `crates/`. Golden test files shared across languages live in `fixtures/`.
 
 ## Commands
 
@@ -20,6 +20,6 @@ Prefer these recipes over the raw underlying commands.
 | Module | Location | Example |
 |---|---|---|
 | `archiver` | `archiver/` | `just archiver test` |
-| `pm-core` | `pm-core/` | `just pm-core build` |
+| `core` | `crates/pm-core/` | `just core test` |
 
-Each module directory has its own AGENTS.md with module-specific commands. When adding an app, add a `mod <name>` to the root justfile and wire its recipes into the root `ci`, `test`, `lint` and `fmt` recipes.
+Each module directory has its own AGENTS.md with module-specific commands. When adding an app or crate, add it to the workspace members if it is Rust, add a `mod <name>` to the root justfile and wire its recipes into the root `ci`, `test`, `lint` and `fmt` recipes.

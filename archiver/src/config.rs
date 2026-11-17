@@ -1,5 +1,6 @@
 use humantime::format_duration;
 use miette::{Diagnostic, NamedSource, SourceSpan};
+use pm_core::market::{RegistryConfig, SelectionRules};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::Deserialize;
@@ -136,6 +137,23 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The rules a market must meet to join the tracked set.
+    pub fn selection_rules(&self) -> SelectionRules {
+        SelectionRules {
+            category_tags: self.category_tags.clone(),
+            min_liquidity_usd: self.min_liquidity_usd,
+        }
+    }
+
+    /// The market registry's settings.
+    pub fn registry_config(&self) -> RegistryConfig {
+        RegistryConfig {
+            selection: self.selection_rules(),
+            registry_interval: self.registry_interval,
+            closed_grace_period: self.closed_grace_period,
+        }
+    }
+
     /// A short fingerprint of the settings, recorded in `run_start` so later analysis can tell
     /// whether they changed between runs. Stable for a given program version.
     pub fn fingerprint(&self) -> String {

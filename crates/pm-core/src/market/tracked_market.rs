@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 
-use crate::market_registry::market_info::MarketInfo;
+use crate::market::market_info::MarketInfo;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrackedMarket {

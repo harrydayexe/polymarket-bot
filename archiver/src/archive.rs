@@ -2,7 +2,6 @@
 //! reader for the offline commands.
 
 pub mod compress;
-pub mod envelope;
-pub mod layout;
-pub mod reader;
-pub mod snapshot_book;
+
+// The reading side of the archive and its format are shared, in pm-core.
+pub use pm_core::archive::{envelope, layout, reader, snapshot_book};

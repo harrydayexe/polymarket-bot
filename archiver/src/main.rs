@@ -1,8 +1,6 @@
 mod archive;
-mod book;
 mod cli;
 mod client;
-mod clock;
 mod commands;
 mod compactor;
 mod config;
@@ -15,6 +13,9 @@ mod status;
 mod types;
 mod verifier;
 mod writer;
+
+// Shared with the live system; moved to pm-core and used from there under the same paths.
+use pm_core::{book, clock};
 
 use std::{io::IsTerminal, process::ExitCode};
 

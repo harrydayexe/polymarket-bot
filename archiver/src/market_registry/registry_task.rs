@@ -50,7 +50,7 @@ pub async fn registry_task(
         last_success,
     } = outputs;
     let mut task = RegistryTask {
-        registry: Registry::new(config.clone()),
+        registry: Registry::new(Arc::new(config.registry_config())),
         client,
         conn_mgr,
         write_queue,
@@ -219,10 +219,8 @@ mod tests {
     use tokio::task::JoinHandle;
 
     use super::*;
-    use crate::{
-        clock::TokioClock,
-        market_registry::{market_info::tests::gamma_market, registry::MarketChange},
-    };
+    use crate::{clock::TokioClock, market_registry::registry::MarketChange};
+    use pm_core::test_util::gamma_market;
 
     /// A Gamma stand-in. `open` is the listing to return, or `None` to fail.
     #[derive(Default)]

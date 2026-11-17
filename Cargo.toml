@@ -1,0 +1,8 @@
+[workspace]
+resolver = "3"
+members = ["archiver", "crates/*"]
+
+[profile.release]
+# A panic anywhere stops the process, so the supervisor restarts it and the next start
+# records the gap, rather than a task dying silently while the rest keeps running.
+panic = "abort"

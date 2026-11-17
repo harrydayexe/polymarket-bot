@@ -7,17 +7,25 @@ use std::{
 use chrono::{DateTime, TimeDelta, Utc};
 use marcasite::types::ConditionId;
 
-use crate::{
-    config::Config,
-    market_registry::{
-        market_info::MarketInfo,
-        not_enough_markets_error::NotEnoughMarketsError,
-        sanity_check::sanity_check,
-        selection::select,
-        token_changes::TokenChanges,
-        tracked_market::{ClosingCause, MarketStatus, TrackedMarket},
-    },
+use crate::market::{
+    market_info::MarketInfo,
+    not_enough_markets_error::NotEnoughMarketsError,
+    sanity_check::sanity_check,
+    selection::{SelectionRules, qualifies},
+    token_changes::TokenChanges,
+    tracked_market::{ClosingCause, MarketStatus, TrackedMarket},
 };
+
+/// The settings the registry plans with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryConfig {
+    /// Which markets may join.
+    pub selection: SelectionRules,
+    /// How often the registry runs a cycle.
+    pub registry_interval: Duration,
+    /// How long a closed or resolved market is kept before it is removed.
+    pub closed_grace_period: Duration,
+}
 
 /// How many registry intervals a removed market is kept out of the tracked set, so a lagging
 /// Gamma listing cannot add it straight back.
@@ -64,7 +72,7 @@ pub struct AppliedChanges {
 
 #[derive(Debug)]
 pub struct Registry {
-    config: Arc<Config>,
+    config: Arc<RegistryConfig>,
     /// Markets currently being tracked (either open or in grace period).
     markets: HashMap<ConditionId, TrackedMarket>,
     /// Markets removed recently, and when, so they are not re-added straight away.
@@ -78,7 +86,7 @@ pub struct Registry {
 }
 
 impl Registry {
-    pub fn new(config: Arc<Config>) -> Self {
+    pub fn new(config: Arc<RegistryConfig>) -> Self {
         Self {
             config,
             markets: HashMap::new(),
@@ -96,7 +104,7 @@ impl Registry {
     }
 
     /// Notes that the listing just checked was rejected, so a count that stays low is
-    /// eventually believed (see [REJECTIONS_BEFORE_ACCEPTING]).
+    /// eventually believed (after a few rejections in a row).
     pub fn note_rejected(&mut self) {
         self.rejections += 1;
     }
@@ -155,7 +163,7 @@ impl Registry {
     }
 
     /// Count the qualifying markets in a Gamma listing and check it is believable. A count
-    /// that has been rejected [REJECTIONS_BEFORE_ACCEPTING] times running is accepted: nothing
+    /// that has been rejected a few times running is accepted: nothing
     /// is unsubscribed on the strength of a listing alone (tracked markets stay until Gamma
     /// says they closed), so believing a persistently short listing is safe.
     ///
@@ -165,7 +173,7 @@ impl Registry {
     pub fn check_listing(&self, listing: &[MarketInfo]) -> Result<u64, NotEnoughMarketsError> {
         let qualifying = listing
             .iter()
-            .filter(|market| select(market, &self.config))
+            .filter(|market| qualifies(market, &self.config.selection))
             .map(|market| &market.condition_id)
             .collect::<HashSet<_>>()
             .len() as u64;
@@ -229,7 +237,9 @@ impl Registry {
     }
 
     fn plan_add(&self, info: MarketInfo, now: DateTime<Utc>) -> Option<TrackedMarket> {
-        if self.recently_removed.contains_key(&info.condition_id) || !select(&info, &self.config) {
+        if self.recently_removed.contains_key(&info.condition_id)
+            || !qualifies(&info, &self.config.selection)
+        {
             return None;
         }
 
@@ -345,7 +355,10 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::market_registry::{market_info::tests::gamma_market, token_changes::MarketTokens};
+    use crate::{
+        market::token_changes::MarketTokens,
+        test_util::{gamma_market, registry_config},
+    };
 
     fn t0() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()
@@ -364,7 +377,7 @@ mod tests {
     }
 
     fn registry() -> Registry {
-        Registry::new(Arc::new(Config::default()))
+        Registry::new(Arc::new(registry_config()))
     }
 
     /// Run one Gamma cycle the way the registry task does, without the network.

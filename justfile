@@ -4,6 +4,10 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 [group("apps")]
 mod archiver
 
+# Shared Rust library: books, markets, archive format, units, print normalisation
+[group("crates")]
+mod core 'crates/pm-core'
+
 # List all recipes, including app modules
 [private]
 default:
@@ -11,16 +15,16 @@ default:
 
 # Run CI checks for every app
 [group("ci")]
-ci: archiver::ci
+ci: archiver::ci core::ci
 
 # Run tests for every app
 [group("ci")]
-test: archiver::test
+test: archiver::test core::test
 
 # Lint every app
 [group("ci")]
-lint: archiver::lint
+lint: archiver::lint core::lint
 
 # Format every app
 [group("ci")]
-fmt: archiver::fmt
+fmt: archiver::fmt core::fmt

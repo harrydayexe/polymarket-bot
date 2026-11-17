@@ -1,4 +1,4 @@
-use crate::market_registry::not_enough_markets_error::NotEnoughMarketsError;
+use crate::market::not_enough_markets_error::NotEnoughMarketsError;
 
 /// Guard against acting on a bad Gamma response.
 pub fn sanity_check(

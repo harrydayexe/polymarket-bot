@@ -1,0 +1,36 @@
+[package]
+name = "pm-core"
+version = "0.1.0"
+edition = "2024"
+description = "Shared library for the Polymarket archiver and live system: books, markets, archive format, units and print normalisation"
+
+[features]
+# Test helpers other crates use in their own tests: a pausable clock, scripted randomness and
+# market fixtures.
+test-util = ["tokio/test-util"]
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["serde", "std"] }
+marcasite = { version = "0.2.0", default-features = false, features = [
+    "clob",
+    "data",
+    "gamma",
+    "ws",
+] }
+marcasite-core = "0.2.0"
+rand = "0.10.3"
+rand_chacha = "0.10.0"
+rust_decimal = { version = "1.43.0", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["raw_value"] }
+thiserror = "2.0.21"
+tokio = { version = "1.53.1", features = ["sync", "time"] }
+tracing = "0.1.44"
+url = { version = "2.5.8", features = ["serde"] }
+zstd = "0.14.3"
+
+[dev-dependencies]
+proptest = "1.12.0"
+rust_decimal_macros = "1.40.0"
+tempfile = "3.27.0"
+tokio = { version = "1.53.1", features = ["macros", "rt", "test-util"] }

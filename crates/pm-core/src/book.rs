@@ -19,7 +19,12 @@ use marcasite::{
 use rust_decimal::Decimal;
 use serde::Serialize;
 
-use crate::archive::snapshot_book::SnapshotBook;
+use crate::{
+    archive::snapshot_book::SnapshotBook,
+    invariant,
+    invariant::InvariantViolation,
+    units::{Price, Shares, Usd},
+};
 
 /// The two sides of a book.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
@@ -93,6 +98,22 @@ pub struct LevelDiff {
     pub price: Decimal,
     pub left: Option<Decimal>,
     pub right: Option<Decimal>,
+}
+
+/// The result of [OrderBook::walk]: what taking liquidity from one side would fill.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WalkResult {
+    /// Shares filled, at most the shares asked for.
+    pub filled: Shares,
+    /// Volume-weighted average price of the fill, rounded half-even to 6 places; `None` when
+    /// nothing filled.
+    pub vwap: Option<Price>,
+    /// Exact cost (or proceeds) of the fill.
+    pub cost: Usd,
+    /// How many price levels the fill touched.
+    pub levels_used: usize,
+    /// Whether the side ran out (within the limit) before the order was filled.
+    pub exhausted: bool,
 }
 
 /// One token's order book at a moment.
@@ -172,7 +193,6 @@ impl OrderBook {
     }
 
     /// The bids, best (highest price) first.
-    #[cfg_attr(not(test), allow(dead_code, reason = "for later analysis"))]
     pub fn bids(&self) -> impl Iterator<Item = Level> + '_ {
         self.bids
             .iter()
@@ -181,31 +201,26 @@ impl OrderBook {
     }
 
     /// The asks, best (lowest price) first.
-    #[cfg_attr(not(test), allow(dead_code, reason = "for later analysis"))]
     pub fn asks(&self) -> impl Iterator<Item = Level> + '_ {
         self.asks
             .iter()
             .map(|(&price, &size)| Level { price, size })
     }
 
-    #[cfg_attr(not(test), allow(dead_code, reason = "for later analysis"))]
     pub fn best_bid(&self) -> Option<Level> {
         self.bids().next()
     }
 
-    #[cfg_attr(not(test), allow(dead_code, reason = "for later analysis"))]
     pub fn best_ask(&self) -> Option<Level> {
         self.asks().next()
     }
 
     /// The size at `price` on `side`, if there is such a level.
-    #[cfg_attr(not(test), allow(dead_code, reason = "for later analysis"))]
     pub fn size_at(&self, side: BookSide, price: Decimal) -> Option<Decimal> {
         self.side(side).get(&price.normalize()).copied()
     }
 
     /// The book after `change`. A change for another token leaves the book as it is.
-    #[cfg_attr(not(test), allow(dead_code, reason = "for later analysis"))]
     pub fn apply(&self, change: &LevelChange) -> OrderBook {
         let mut book = self.clone();
         book.apply_in_place(change);
@@ -232,7 +247,6 @@ impl OrderBook {
 
     /// The book with a new tick size. Levels are kept as they are: existing levels stay valid
     /// and later changes may use prices at the new tick.
-    #[cfg_attr(not(test), allow(dead_code, reason = "for later analysis"))]
     pub fn with_tick_size(&self, tick_size: Decimal) -> OrderBook {
         let mut book = self.clone();
         book.set_tick_size(tick_size);
@@ -250,7 +264,6 @@ impl OrderBook {
     }
 
     /// How many levels differ: present in one book only, or with a different size.
-    #[cfg_attr(not(test), allow(dead_code, reason = "for later analysis"))]
     pub fn differing_levels(&self, other: &OrderBook) -> usize {
         self.differences(other).len()
     }
@@ -285,6 +298,103 @@ impl OrderBook {
         diffs
     }
 
+    /// The midpoint, (best bid + best ask) / 2, or `None` if either side is empty.
+    pub fn mid(&self) -> Option<Price> {
+        let (bid, ask) = (self.best_bid()?.price, self.best_ask()?.price);
+        let mid = (bid + ask) / Decimal::TWO;
+        invariant!(bid.min(ask) <= mid && mid <= bid.max(ask), None);
+        // Exchange prices are in [0, 1]; a book holding others is corrupt.
+        invariant!(Price::new(mid).is_ok(), None);
+        Price::new(mid).ok()
+    }
+
+    /// The value, Σ size × price in USD, of the levels on `side` within `cents` of its best
+    /// price: asks priced at most best ask + `cents`/100, or bids at least best bid −
+    /// `cents`/100. Zero for an empty side. Exact; round the final result.
+    pub fn depth_within(&self, side: BookSide, cents: Decimal) -> Usd {
+        let width = cents / Decimal::ONE_HUNDRED;
+        invariant!(width >= Decimal::ZERO, Usd::ZERO);
+        let Some(best) = self.levels(side).next() else {
+            return Usd::ZERO;
+        };
+        let depth: Decimal = self
+            .levels(side)
+            .take_while(|level| match side {
+                BookSide::Ask => level.price <= best.price + width,
+                BookSide::Bid => level.price >= best.price - width,
+            })
+            .map(|level| level.price * level.size)
+            .sum();
+        invariant!(depth >= best.price * best.size, Usd::ZERO);
+        Usd::new(depth)
+    }
+
+    /// The fill from taking up to `shares` from `side`, best price first, at prices no worse
+    /// than `limit` (the most to pay when taking asks, the least to accept when taking bids).
+    /// Use [Price::ONE] or [Price::ZERO] for no limit. The book itself is not changed.
+    ///
+    /// # Errors
+    ///
+    /// If the book holds a level outside the units' ranges, or the fill fails a consistency
+    /// check; neither can happen with a book built from exchange data.
+    pub fn walk(
+        &self,
+        side: BookSide,
+        limit: Price,
+        shares: Shares,
+    ) -> Result<WalkResult, InvariantViolation> {
+        let within_limit = |price: Decimal| match side {
+            BookSide::Ask => price <= limit.value(),
+            BookSide::Bid => price >= limit.value(),
+        };
+        let mut filled = Decimal::ZERO;
+        let mut cost = Decimal::ZERO;
+        let mut levels_used = 0;
+        for level in self.levels(side) {
+            if filled >= shares.value() || !within_limit(level.price) {
+                break;
+            }
+            let take = level.size.min(shares.value() - filled);
+            filled += take;
+            cost += take * level.price;
+            levels_used += 1;
+        }
+        invariant!(
+            filled <= shares.value(),
+            Err(InvariantViolation("a walk fills no more than asked"))
+        );
+        let filled =
+            Shares::new(filled).map_err(|_| InvariantViolation("book sizes are positive"))?;
+        let vwap = if filled.is_zero() {
+            None
+        } else {
+            let vwap = Price::new(cost / filled.value())
+                .map_err(|_| InvariantViolation("book prices are in [0, 1]"))?;
+            invariant!(
+                within_limit(vwap.value()),
+                Err(InvariantViolation(
+                    "the average fill price is within the limit"
+                ))
+            );
+            Some(vwap.rounded())
+        };
+        Ok(WalkResult {
+            filled,
+            vwap,
+            cost: Usd::new(cost),
+            levels_used,
+            exhausted: filled < shares,
+        })
+    }
+
+    /// The levels of `side`, best first.
+    pub fn levels(&self, side: BookSide) -> Box<dyn Iterator<Item = Level> + '_> {
+        match side {
+            BookSide::Bid => Box::new(self.bids()),
+            BookSide::Ask => Box::new(self.asks()),
+        }
+    }
+
     fn side(&self, side: BookSide) -> &BTreeMap<Decimal, Decimal> {
         match side {
             BookSide::Bid => &self.bids,
@@ -307,16 +417,12 @@ impl OrderBook {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    use chrono::TimeZone;
+mod tests {
     use rust_decimal_macros::dec;
     use serde_json::json;
 
     use super::*;
-
-    pub(crate) fn t(ms: i64) -> DateTime<Utc> {
-        Utc.timestamp_millis_opt(ms).unwrap()
-    }
+    use crate::test_util::t;
 
     fn token() -> TokenId {
         TokenId::new("111")
@@ -578,5 +684,120 @@ pub(crate) mod tests {
         );
         assert_eq!(changes[1].as_ref().unwrap().side, BookSide::Ask);
         assert_eq!(changes[2], Err(UnknownSide("HOLD".into())));
+    }
+
+    fn price(d: Decimal) -> Price {
+        Price::new(d).unwrap()
+    }
+
+    fn shares(d: Decimal) -> Shares {
+        Shares::new(d).unwrap()
+    }
+
+    #[test]
+    fn depth_within_five_cents_of_the_best_ask() {
+        let b = book(
+            &[],
+            &[
+                (dec!(0.10), dec!(100)),
+                (dec!(0.12), dec!(50)),
+                (dec!(0.16), dec!(1000)),
+            ],
+        );
+        // 0.10·100 + 0.12·50; 0.16 is more than 5¢ away.
+        assert_eq!(
+            b.depth_within(BookSide::Ask, dec!(5)),
+            Usd::new(dec!(16.00))
+        );
+        // The boundary is inclusive.
+        assert_eq!(
+            b.depth_within(BookSide::Ask, dec!(6)),
+            Usd::new(dec!(176.00))
+        );
+        assert_eq!(b.depth_within(BookSide::Ask, dec!(0)), Usd::new(dec!(10)));
+        assert_eq!(b.depth_within(BookSide::Bid, dec!(5)), Usd::ZERO);
+    }
+
+    #[test]
+    fn depth_within_on_the_bid_side_goes_down_from_the_best_bid() {
+        let b = book(
+            &[
+                (dec!(0.50), dec!(10)),
+                (dec!(0.46), dec!(10)),
+                (dec!(0.44), dec!(10)),
+            ],
+            &[],
+        );
+        assert_eq!(b.depth_within(BookSide::Bid, dec!(5)), Usd::new(dec!(9.6)));
+    }
+
+    #[test]
+    fn walk_across_two_levels() {
+        let b = book(&[], &[(dec!(0.10), dec!(100)), (dec!(0.11), dec!(50))]);
+        let fill = b
+            .walk(BookSide::Ask, Price::ONE, shares(dec!(120)))
+            .unwrap();
+        assert_eq!(fill.filled, shares(dec!(120)));
+        assert_eq!(fill.vwap, Some(price(dec!(0.101667))));
+        assert_eq!(fill.cost, Usd::new(dec!(12.2)));
+        assert_eq!(fill.levels_used, 2);
+        assert!(!fill.exhausted);
+        // The book is unchanged.
+        assert_eq!(b.best_ask(), Some(level(dec!(0.10), dec!(100))));
+    }
+
+    #[test]
+    fn walk_stops_at_the_limit() {
+        let b = book(&[], &[(dec!(0.10), dec!(100)), (dec!(0.11), dec!(50))]);
+        let fill = b
+            .walk(BookSide::Ask, price(dec!(0.10)), shares(dec!(200)))
+            .unwrap();
+        assert_eq!(fill.filled, shares(dec!(100)));
+        assert_eq!(fill.vwap, Some(price(dec!(0.10))));
+        assert_eq!(fill.levels_used, 1);
+        assert!(fill.exhausted);
+    }
+
+    #[test]
+    fn walk_of_bids_and_of_an_empty_side() {
+        let b = book(&[(dec!(0.50), dec!(10)), (dec!(0.40), dec!(10))], &[]);
+        let fill = b
+            .walk(BookSide::Bid, price(dec!(0.45)), shares(dec!(15)))
+            .unwrap();
+        assert_eq!(fill.filled, shares(dec!(10)));
+        assert!(fill.exhausted);
+        let all = b
+            .walk(BookSide::Bid, Price::ZERO, shares(dec!(15)))
+            .unwrap();
+        assert_eq!(all.vwap, Some(price(dec!(0.466667))));
+        assert_eq!(all.levels_used, 2);
+
+        let none = b.walk(BookSide::Ask, Price::ONE, shares(dec!(1))).unwrap();
+        assert_eq!(none.filled, Shares::ZERO);
+        assert_eq!(none.vwap, None);
+        assert_eq!(none.levels_used, 0);
+        assert!(none.exhausted);
+        let zero = b.walk(BookSide::Bid, Price::ZERO, Shares::ZERO).unwrap();
+        assert!(!zero.exhausted);
+        assert_eq!(zero.levels_used, 0);
+    }
+
+    #[test]
+    fn walk_reports_a_corrupt_book() {
+        let b = book(&[], &[(dec!(1.5), dec!(10))]);
+        assert!(
+            b.walk(BookSide::Ask, Price::ONE, shares(dec!(1)))
+                .is_ok_and(|f| f.filled.is_zero())
+        );
+        let b = book(&[(dec!(1.5), dec!(10))], &[]);
+        assert!(b.walk(BookSide::Bid, Price::ZERO, shares(dec!(1))).is_err());
+    }
+
+    #[test]
+    fn mid_needs_both_sides() {
+        assert_eq!(book(&[], &[(dec!(0.12), dec!(1))]).mid(), None);
+        assert_eq!(book(&[(dec!(0.10), dec!(1))], &[]).mid(), None);
+        let b = book(&[(dec!(0.10), dec!(1))], &[(dec!(0.12), dec!(1))]);
+        assert_eq!(b.mid(), Some(price(dec!(0.11))));
     }
 }

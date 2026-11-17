@@ -60,10 +60,9 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
-    use crate::{
-        archive::envelope::{StoredBody, encode},
-        messages::{ControlBody, Record},
-        types::RunId,
+    use crate::archive::{
+        envelope::{StoredBody, encode},
+        record::{ControlBody, Record, RunId},
     };
 
     #[test]

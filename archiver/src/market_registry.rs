@@ -1,9 +1,9 @@
+//! The market registry task. The pure parts (market parsing, selection, the sanity check and
+//! change planning) are shared with the live system, in pm-core.
+
 pub mod cycle;
-pub mod market_info;
-pub mod not_enough_markets_error;
-pub mod registry;
 pub mod registry_task;
-mod sanity_check;
-pub mod selection;
-pub mod token_changes;
-pub mod tracked_market;
+
+pub use pm_core::market::{
+    market_info, not_enough_markets_error, registry, selection, token_changes,
+};
