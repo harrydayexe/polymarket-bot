@@ -1745,6 +1745,7 @@ name = "pm-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "futures-util",
  "humantime-serde",
  "marcasite",
  "marcasite-core",
@@ -1758,8 +1759,38 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-tungstenite",
  "toml",
  "tracing",
+ "url",
+ "wiremock",
+ "zstd",
+]
+
+[[package]]
+name = "pm-live"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "clap",
+ "futures-util",
+ "humantime-serde",
+ "marcasite",
+ "marcasite-core",
+ "pm-core",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
  "url",
  "wiremock",
  "zstd",

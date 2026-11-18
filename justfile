@@ -8,6 +8,10 @@ mod archiver
 [group("crates")]
 mod core 'crates/pm-core'
 
+# Live paper-trading system: ingest, engine (Rust)
+[group("apps")]
+mod live 'crates/pm-live'
+
 # List all recipes, including app modules
 [private]
 default:
@@ -15,16 +19,16 @@ default:
 
 # Run CI checks for every app
 [group("ci")]
-ci: archiver::ci core::ci
+ci: archiver::ci core::ci live::ci
 
 # Run tests for every app
 [group("ci")]
-test: archiver::test core::test
+test: archiver::test core::test live::test
 
 # Lint every app
 [group("ci")]
-lint: archiver::lint core::lint
+lint: archiver::lint core::lint live::lint
 
 # Format every app
 [group("ci")]
-fmt: archiver::fmt core::fmt
+fmt: archiver::fmt core::fmt live::fmt
