@@ -69,7 +69,8 @@ pub struct RunOutcome {
     pub log_files: Vec<PathBuf>,
 }
 
-/// Runs `task` and cancels the run if it fails or panics. Returns whether it finished cleanly.
+/// Runs `task` and cancels the run if it fails or panics (a panic is caught only where
+/// panics unwind: the release profile aborts).
 async fn supervise(
     name: &'static str,
     token: CancellationToken,
@@ -342,8 +343,11 @@ pub async fn run(
     if time::timeout(SHUTDOWN_LIMIT, tracker.wait()).await.is_err() {
         tracing::warn!("tasks did not stop in time");
     }
-    executor.sink.flush().context("could not flush records")?;
+    // Both, whatever the other's outcome: a failed records flush must not leave the open
+    // hour uncompressed or abandon compressions in flight.
+    let records = executor.sink.flush().context("could not flush records");
     let log_files = log.finish().context("could not finish the engine log")?;
+    records?;
     outcome?;
     if failed.load(Ordering::SeqCst) {
         bail!("a task failed");

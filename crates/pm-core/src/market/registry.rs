@@ -98,7 +98,6 @@ impl Registry {
         }
     }
 
-    /// When a Gamma listing was last accepted and applied.
     /// The tracked market with this condition id, if any.
     pub fn get(&self, id: &ConditionId) -> Option<&TrackedMarket> {
         self.markets.get(id)
@@ -109,10 +108,12 @@ impl Registry {
         self.markets.len()
     }
 
+    /// Whether no market is tracked.
     pub fn is_empty(&self) -> bool {
         self.markets.is_empty()
     }
 
+    /// When a Gamma listing was last accepted and applied.
     pub fn last_success_at(&self) -> Option<DateTime<Utc>> {
         self.last_success_at
     }

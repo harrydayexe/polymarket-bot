@@ -213,6 +213,21 @@ pub struct LiveMarket {
     pub fees: FeeParams,
 }
 
+impl LiveMarket {
+    /// `info`'s own fee fields move out: they are not serialised, so leaving them would make
+    /// a replayed market differ from the live one. Gamma's flag becomes
+    /// [Self::fees_enabled]; the parameters in force are `fees`.
+    pub fn new(mut info: MarketInfo, fees: FeeParams) -> Self {
+        let fees_enabled = info.fees_enabled.take();
+        info.fee_params = None;
+        Self {
+            info,
+            fees_enabled,
+            fees,
+        }
+    }
+}
+
 /// A market that left the universe (after its grace period), or whose tokens changed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemovedMarket {

@@ -236,6 +236,10 @@ impl Config {
             ingest.connect_timeout,
             ingest.heartbeat_interval,
             ingest.resnapshot_after_decode_error,
+            // Zero would turn every `new_market` hint (thousands an hour) into a Gamma poll.
+            ingest.new_market_min_gap,
+            ingest.reconnect_stable_after,
+            engine.untrusted_alarm_after,
             engine.book_ring_window,
             engine.volume_window,
             engine.metrics_interval,

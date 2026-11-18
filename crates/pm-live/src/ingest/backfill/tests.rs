@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use chrono::{TimeZone, Utc};
 use rust_decimal_macros::dec;
 use serde_json::{Value, json};
@@ -119,6 +121,19 @@ async fn three_pages_give_one_complete_backfill_per_condition() {
         (TakerSide::Sell, dec!(0.3), dec!(4))
     );
     assert_eq!(first.timestamp, t(T0 - 20));
+}
+
+#[tokio::test]
+async fn more_pages_without_a_usable_cursor_leave_the_backfill_incomplete() {
+    // `has_more` with an empty cursor, before `from` is reached.
+    let second = ResponseTemplate::new(200).set_body_json(json!({
+        "data": [row(1, yes(1).as_ref(), "BUY", "0.5", "1", "0x11", T0 - 2000)],
+        "pagination": {"limit": 1000, "offset": 0, "has_more": true, "next_cursor": ""},
+    }));
+    let server = server(second).await;
+    let result = fetch_batch(&client(&server), &[condition(1)], t(T0 - 50_000), t(T0), 50).await;
+    assert_eq!(result.pages, 2);
+    assert!(!result.complete);
 }
 
 #[tokio::test]

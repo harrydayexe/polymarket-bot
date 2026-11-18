@@ -7,7 +7,13 @@
 //! `fallback_conservative` for politics); if the tags match no table category, the `other` row
 //! as `fallback_conservative`. A changed (rate, exponent) is a `changed` entry.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
+
+use chrono::TimeDelta;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -37,6 +43,9 @@ use crate::{
     config::IngestConfig,
     event::{Event, LiveMarket, MarketChanged, RemovedMarket, Stamped},
 };
+
+/// How long CLOB fee details are reused for a market Gamma gives no fee schedule for.
+const CLOB_FEE_TTL: TimeDelta = TimeDelta::minutes(15);
 
 /// Gamma, as the registry needs it.
 #[async_trait]
@@ -150,6 +159,8 @@ pub struct RegistryState {
     table: FeeTable,
     /// The fee parameters last reported per tracked market.
     fees: HashMap<ConditionId, FeeParams>,
+    /// When the CLOB was last asked for a tracked market's fees.
+    clob_checked: HashMap<ConditionId, UtcMicros>,
     interval: Duration,
     new_market_min_gap: Duration,
 }
@@ -160,18 +171,15 @@ impl RegistryState {
             registry: Registry::new(Arc::new(config.registry_config())),
             table,
             fees: HashMap::new(),
+            clob_checked: HashMap::new(),
             interval: config.registry_interval,
             new_market_min_gap: config.new_market_min_gap,
         }
     }
 
-    pub fn tracked(&self) -> usize {
-        self.registry.len()
-    }
-
     /// The fee parameters for `info` at `now` (D13).
     async fn resolve_fees(
-        &self,
+        &mut self,
         info: &MarketInfo,
         clob: &dyn ClobFees,
         now: UtcMicros,
@@ -179,23 +187,39 @@ impl RegistryState {
         if let Some(fees) = info.fee_params {
             return fees;
         }
-        // A failed CLOB call keeps parameters last read from the CLOB rather than falling back,
-        // so a transient error is not a fee change.
-        let previous = self.fees.get(&info.condition_id).copied();
-        match clob.fee_details(&info.condition_id).await {
-            Ok(Some((rate, exponent))) => {
-                return FeeParams {
-                    rate,
-                    exponent,
-                    source: FeeSource::Clob,
-                    seen_at: now,
-                };
+        let id = &info.condition_id;
+        let previous = self.fees.get(id).copied();
+        // Every poll resolves every market seen, one CLOB call at a time: without this, a
+        // Gamma outage of `feeSchedule` would make each poll take minutes.
+        let checked_recently = self
+            .clob_checked
+            .get(id)
+            .is_some_and(|at| now - *at < CLOB_FEE_TTL);
+        if checked_recently {
+            if let Some(previous) = previous.filter(|p| p.source == FeeSource::Clob) {
+                return previous;
             }
-            Ok(None) => tracing::debug!(condition = %info.condition_id, "no CLOB fee details"),
-            Err(error) => {
-                tracing::warn!(condition = %info.condition_id, error = %format!("{error:#}"), "CLOB fee lookup failed");
-                if let Some(previous) = previous.filter(|p| p.source == FeeSource::Clob) {
-                    return previous;
+        } else {
+            self.clob_checked.insert(id.clone(), now);
+            match clob.fee_details(id).await {
+                Ok(Some((rate, exponent))) => {
+                    return FeeParams {
+                        rate,
+                        exponent,
+                        source: FeeSource::Clob,
+                        seen_at: now,
+                    };
+                }
+                Ok(None) => tracing::debug!(condition = %id, "no CLOB fee details"),
+                Err(error) => {
+                    tracing::warn!(condition = %id, error = %format!("{error:#}"), "CLOB fee lookup failed");
+                    // Keep parameters read from Gamma or the CLOB rather than falling back,
+                    // so a transient error is not a fee change.
+                    if let Some(previous) =
+                        previous.filter(|p| matches!(p.source, FeeSource::Gamma | FeeSource::Clob))
+                    {
+                        return previous;
+                    }
                 }
             }
         }
@@ -243,7 +267,7 @@ impl RegistryState {
                         let plan = self.registry.plan_changes(listing, followup, accepted, now);
                         let applied = self.registry.apply_plan(plan, now);
                         remove.extend(removed_markets(&applied.tokens));
-                        let details_changed: Vec<ConditionId> = applied
+                        let details_changed: HashSet<ConditionId> = applied
                             .records
                             .iter()
                             .filter(|(change, _)| *change == MarketChange::Updated)
@@ -258,13 +282,9 @@ impl RegistryState {
                             let info = tracked.info.clone();
                             let fees = self.resolve_fees(&info, clob, now).await;
                             self.fees.insert(id.clone(), fees);
-                            add.push(LiveMarket {
-                                fees_enabled: info.fees_enabled,
-                                info,
-                                fees,
-                            });
+                            add.push(LiveMarket::new(info, fees));
                         }
-                        let just_added: Vec<ConditionId> =
+                        let just_added: HashSet<ConditionId> =
                             add.iter().map(|m| m.info.condition_id.clone()).collect();
                         for info in seen {
                             let id = info.condition_id.clone();
@@ -284,16 +304,19 @@ impl RegistryState {
                             let Some(tracked) = self.registry.get(&id) else {
                                 continue;
                             };
+                            // The parameters last reported (just updated if they changed).
+                            let in_force = self.fees.get(&id).copied().unwrap_or(fees);
+                            let mut market = LiveMarket::new(tracked.info.clone(), in_force);
+                            market.fees_enabled = info.fees_enabled;
                             changed.push(MarketChanged {
-                                market: LiveMarket {
-                                    info: tracked.info.clone(),
-                                    fees_enabled: info.fees_enabled,
-                                    fees: self.fees[&id],
-                                },
+                                market,
                                 details_changed: details,
                                 fee_changed,
                             });
                         }
+                        changed.sort_by(|a, b| {
+                            a.market.info.condition_id.cmp(&b.market.info.condition_id)
+                        });
                     }
                 }
             }
@@ -304,6 +327,7 @@ impl RegistryState {
         for market in &remove {
             if self.registry.get(&market.condition_id).is_none() {
                 self.fees.remove(&market.condition_id);
+                self.clob_checked.remove(&market.condition_id);
             }
         }
         invariant!(
@@ -376,7 +400,7 @@ fn removed_markets(changes: &TokenChanges) -> Vec<RemovedMarket> {
 ///
 /// # Errors
 ///
-/// If an invariant fails or the engine is gone.
+/// If an invariant fails.
 pub async fn registry_task(
     mut state: RegistryState,
     source: Arc<dyn MarketSource>,
@@ -418,7 +442,15 @@ pub async fn registry_task(
                     polled = state.poll(source.as_ref(), clob.as_ref(), now) => polled?,
                 };
                 if let Some(event) = polled {
-                    out.send(Stamped::at(clock.now(), event)).await.context("the engine has stopped")?;
+                    tokio::select! {
+                        () = token.cancelled() => return Ok(()),
+                        sent = out.send(Stamped::at(clock.now(), event)) => {
+                            // The queue closes only when the run is stopping.
+                            if sent.is_err() {
+                                return Ok(());
+                            }
+                        }
+                    }
                 }
             }
         }

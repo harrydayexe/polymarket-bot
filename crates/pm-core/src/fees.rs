@@ -7,7 +7,7 @@
 //! `politics_other`, which the table cannot tell apart, so a politics market gets the higher
 //! rate in force and [FeeSource::FallbackConservative].
 
-use std::path::Path;
+use std::{collections::BTreeSet, path::Path};
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -113,18 +113,21 @@ impl FeeTable {
                 });
             }
         }
+        // Before sorting, so the index is the row's place in the file.
+        let mut seen = BTreeSet::new();
+        for (index, row) in rows.iter().enumerate() {
+            if !seen.insert((row.category.as_str(), row.effective_from)) {
+                return Err(FeeTableError::Row {
+                    index,
+                    category: row.category.clone(),
+                    problem: "two rows share an effective_from",
+                });
+            }
+        }
+        drop(seen);
         rows.sort_by(|a, b| {
             (a.category.as_str(), a.effective_from).cmp(&(b.category.as_str(), b.effective_from))
         });
-        if let Some(pair) = rows.windows(2).find(|pair| {
-            pair[0].category == pair[1].category && pair[0].effective_from == pair[1].effective_from
-        }) {
-            return Err(FeeTableError::Row {
-                index: 0,
-                category: pair[0].category.clone(),
-                problem: "two rows share an effective_from",
-            });
-        }
         invariant!(
             rows.windows(2)
                 .all(|p| (p[0].category.as_str(), p[0].effective_from)

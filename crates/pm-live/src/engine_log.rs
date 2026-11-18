@@ -133,11 +133,14 @@ impl EngineLogWriter {
 
     /// Appends one envelope. If its hour differs from the open file's, the open file is
     /// flushed, closed and compressed (in a background thread, so the engine is not
-    /// blocked), and a new file is opened. Envelopes must arrive with non-decreasing
-    /// `available_at` hours and strictly increasing `seq`; violating either is an error
-    /// ([EngineLogError::OutOfOrder]) and nothing is written.
+    /// blocked), and a new file is opened. Envelopes must arrive with strictly increasing
+    /// `seq`, else it is an error ([EngineLogError::OutOfOrder]) and nothing is written.
+    /// Receive times from different tasks can step back slightly (the engine's clock does
+    /// not), so an envelope stamped in an hour already closed goes in the open file: files
+    /// stay in `seq` order, and replay reads them in that order.
     pub fn append(&mut self, envelope: &Envelope) -> Result<(), EngineLogError> {
-        let key = hour_key(&envelope.available_at);
+        let stamped = hour_key(&envelope.available_at);
+        let key = self.open_hour.map_or(stamped, |open| open.max(stamped));
         if let Some(prev) = self.last_seq
             && envelope.seq <= prev
         {
@@ -145,15 +148,6 @@ impl EngineLogWriter {
                 what: "seq must be strictly increasing",
                 previous: prev.to_string(),
                 got: envelope.seq.to_string(),
-            });
-        }
-        if let Some(prev) = self.open_hour
-            && key < prev
-        {
-            return Err(EngineLogError::OutOfOrder {
-                what: "available_at hour must not decrease",
-                previous: format!("{} {:02}h", prev.0, prev.1),
-                got: format!("{} {:02}h", key.0, key.1),
             });
         }
         let mut line = serde_json::to_vec(envelope)?;
@@ -634,19 +628,18 @@ mod tests {
     }
 
     #[test]
-    fn out_of_order_hour_is_refused() {
+    fn an_envelope_stamped_in_a_closed_hour_goes_in_the_open_file() {
         let dir = tempfile::tempdir().unwrap();
         let mut w = EngineLogWriter::new(dir.path(), "r");
         w.append(&env(1, at(14, 0, 0))).unwrap();
-        let err = w.append(&env(2, at(13, 59, 59))).unwrap_err();
-        assert!(matches!(err, EngineLogError::OutOfOrder { .. }), "{err}");
-        // Within the same hour, a slightly earlier available_at is fine.
-        w.append(&env(3, at(14, 0, 0))).unwrap();
+        // Stamped by another task just before the hour turned, queued behind seq 1.
+        w.append(&env(2, at(13, 59, 59))).unwrap();
+        w.append(&env(3, at(14, 0, 1))).unwrap();
         let files = w.finish().unwrap();
         assert_eq!(files.len(), 1);
         assert!(!dir.path().join("date=2026-03-05/hour=13").exists());
         let seqs: Vec<u64> = read_all(files).iter().map(|e| e.seq).collect();
-        assert_eq!(seqs, vec![1, 3]);
+        assert_eq!(seqs, vec![1, 2, 3]);
     }
 
     #[test]

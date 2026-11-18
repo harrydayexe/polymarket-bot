@@ -402,8 +402,9 @@ pub enum FeeSource {
     Clob,
     /// The dated table in `config/fee_schedule_history.toml`.
     Fallback,
-    /// The dated table, for a category whose coefficient the table cannot pin down (politics:
-    /// elections or not), so the higher one in force was used.
+    /// The dated table, when the market's tags match more than one fee category (as politics
+    /// does: elections or not), so the highest rate in force among them was used; also the
+    /// `other` row for tags that match no category.
     FallbackConservative,
 }
 

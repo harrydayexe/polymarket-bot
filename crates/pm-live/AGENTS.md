@@ -11,7 +11,7 @@ I/O tasks turn the outside world into `event::Envelope`s (`event_time` = exchang
 | `config` | `pmlive.toml` (`config/pmlive.example.toml` at the repo root) |
 | `event` | `Envelope`, `Event`, `LiveMarket`, `BackfillPrint` |
 | `action` | `Action`, `Record` (rows C8 will store in Postgres), `Metric` |
-| `engine` | `Engine`; `books` (ring of versions + trust, §3.4, mirror check), `volume` (24 h pair volume with backfill merge, §3.6), `ordering` (price_change vs last_trade_price metric, D3) |
+| `engine` | `Engine`; `books` (ring of versions + trust, §3.4; a YES/NO mirror check, not wired into the engine yet), `volume` (24 h pair volume with backfill merge, §3.6), `ordering` (price_change vs last_trade_price metric, D3) |
 | `ingest::ws` | One `ReconnectingMarketChannel` per slot (D11); pure `translate` of the C2 table |
 | `ingest::registry` | Gamma poll through pm-core `Registry`; fees gamma → clob → dated table (D13) |
 | `ingest::backfill` | `/v2/trades` per ≤ 20 conditions on the `data_bulk` budget (D12) |

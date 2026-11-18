@@ -51,5 +51,6 @@ ci: fmt-check lint test
 # Run the pmlive CLI via cargo run, e.g. `just live run run --config config/pmlive.example.toml`
 [group("run")]
 [unix]
+[no-cd]
 run *args:
     cargo run --bin pmlive -- {{ args }}

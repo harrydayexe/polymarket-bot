@@ -6,7 +6,7 @@
 //! Each condition of the batch then gets one `VolumeBackfill` with the rows in
 //! `[from, until)`; `complete` is false if a page failed or the page cap was hit.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::{BTreeMap, VecDeque};
 
 use anyhow::Result;
 use marcasite::{
@@ -18,10 +18,7 @@ use pm_core::{
     normalize::{TakerSide, TxHash},
     units::{Price, Shares, UtcMicros},
 };
-use tokio::{
-    sync::{Semaphore, mpsc},
-    task::JoinSet,
-};
+use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use crate::event::{BackfillPrint, Event, Stamped};
@@ -113,12 +110,15 @@ pub async fn fetch_batch(
             }
         }
         let reached_start = oldest.is_some_and(|o| o < from);
+        if reached_start || !page.has_more() {
+            result.complete = true;
+            return result;
+        }
         match page.next_cursor() {
-            Some(next) if !reached_start && cursor.as_deref() != Some(next) => {
-                cursor = Some(next.to_owned())
-            }
-            _ => {
-                result.complete = true;
+            Some(next) if cursor.as_deref() != Some(next) => cursor = Some(next.to_owned()),
+            // More pages, but no way to them: what was read is not the whole interval.
+            next => {
+                tracing::warn!(pages = result.pages, cursor = ?next, "backfill paging stuck");
                 return result;
             }
         }
@@ -140,9 +140,39 @@ pub async fn backfill_task(
     mut requests: mpsc::UnboundedReceiver<BackfillRequest>,
     token: CancellationToken,
 ) -> Result<()> {
-    let permits = Arc::new(Semaphore::new(concurrency.max(1)));
+    let concurrency = concurrency.max(1);
+    // Batches waiting for a slot: only `concurrency` tasks exist at a time.
+    let mut queue: VecDeque<(Vec<ConditionId>, UtcMicros, UtcMicros)> = VecDeque::new();
     let mut batches = JoinSet::new();
     loop {
+        while batches.len() < concurrency
+            && let Some((chunk, from, until)) = queue.pop_front()
+        {
+            let (client, clock, out) = (client.clone(), clock.clone(), out.clone());
+            batches.spawn(async move {
+                let result = fetch_batch(&client, &chunk, from, until, max_pages).await;
+                tracing::debug!(
+                    conditions = chunk.len(),
+                    pages = result.pages,
+                    rows = result.rows,
+                    complete = result.complete,
+                    "backfill batch done"
+                );
+                let now = clock.now();
+                for (condition, prints) in result.prints {
+                    let event = Event::VolumeBackfill {
+                        condition,
+                        prints,
+                        complete: result.complete,
+                        from,
+                        until,
+                    };
+                    if out.send(Stamped::at(now, event)).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
         tokio::select! {
             biased;
             () = token.cancelled() => break,
@@ -154,27 +184,7 @@ pub async fn backfill_task(
             request = requests.recv() => {
                 let Some(request) = request else { break };
                 for chunk in request.conditions.chunks(CONDITIONS_PER_REQUEST) {
-                    let (client, permits, clock, out) = (client.clone(), permits.clone(), clock.clone(), out.clone());
-                    let chunk = chunk.to_vec();
-                    let (from, until) = (request.from, request.until);
-                    batches.spawn(async move {
-                        let Ok(_permit) = permits.acquire().await else { return };
-                        let result = fetch_batch(&client, &chunk, from, until, max_pages).await;
-                        tracing::debug!(conditions = chunk.len(), pages = result.pages, rows = result.rows, complete = result.complete, "backfill batch done");
-                        let now = clock.now();
-                        for (condition, prints) in result.prints {
-                            let event = Event::VolumeBackfill {
-                                condition,
-                                prints,
-                                complete: result.complete,
-                                from,
-                                until,
-                            };
-                            if out.send(Stamped::at(now, event)).await.is_err() {
-                                return;
-                            }
-                        }
-                    });
+                    queue.push_back((chunk.to_vec(), request.from, request.until));
                 }
             }
         }

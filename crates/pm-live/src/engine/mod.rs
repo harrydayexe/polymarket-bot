@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use chrono::TimeDelta;
 use marcasite::{
     types::{ConditionId, TokenId},
-    ws::{BookEvent, LastTradePriceEvent, PriceChangeEvent},
+    ws::{BookEvent, LastTradePriceEvent, MarketResolvedEvent, PriceChangeEvent},
 };
 use pm_core::{
     archive::record::ConnSlotId,
@@ -32,7 +32,7 @@ use pm_core::{
 use crate::{
     action::{Action, Metric, Record, RegistryHint},
     config::EngineConfig,
-    event::{Envelope, Event, LiveMarket, MarketChanged, RemovedMarket, Stamped},
+    event::{BackfillPrint, Envelope, Event, LiveMarket, MarketChanged, RemovedMarket, Stamped},
 };
 use books::{Distrust, RingLimits, TokenBook};
 use ordering::{Observation, OrderingTracker};
@@ -46,6 +46,18 @@ pub struct SlotState {
     pub connected_since: Option<UtcMicros>,
     /// When the last market message arrived on it.
     pub last_message_at: Option<UtcMicros>,
+    /// A decode error's resnapshot is due; errors until then are coalesced into it.
+    pub decode_errors: Option<DecodeErrors>,
+}
+
+/// Decode errors on one slot awaiting their resnapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodeErrors {
+    /// The latest error.
+    pub last: UtcMicros,
+    /// The first error after the one that scheduled the resnapshot, if any: these errors'
+    /// backfill is requested with the resnapshot.
+    pub coalesced_from: Option<UtcMicros>,
 }
 
 impl SlotState {
@@ -57,8 +69,9 @@ impl SlotState {
 /// Something due at a time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Timer {
-    /// Resubscribe tokens of `slot` still untrusted after a decode error at `since`.
-    Resnapshot { slot: ConnSlotId, since: UtcMicros },
+    /// Resubscribe tokens of `slot` still untrusted after its decode errors
+    /// ([SlotState::decode_errors]), and backfill the coalesced ones.
+    Resnapshot { slot: ConnSlotId },
 }
 
 /// Counters, written as metrics every `metrics_interval` and reset.
@@ -97,6 +110,8 @@ pub struct Engine {
     /// The latest `available_at` seen; time never goes back.
     now: Option<UtcMicros>,
     markets: BTreeMap<ConditionId, LiveMarket>,
+    /// Tracked markets whose resolution has been recorded.
+    resolved: BTreeSet<ConditionId>,
     token_market: HashMap<TokenId, ConditionId>,
     assignment: TokenAssignment,
     slots: BTreeMap<ConnSlotId, SlotState>,
@@ -122,6 +137,19 @@ fn sorted(tokens: impl IntoIterator<Item = TokenId>) -> Vec<TokenId> {
     tokens
 }
 
+/// Conditions to backfill, grouped by interval.
+type Backfills = BTreeMap<(UtcMicros, UtcMicros), BTreeSet<ConditionId>>;
+
+fn push_backfills(backfills: Backfills, actions: &mut Vec<Action>) {
+    for ((from, until), conditions) in backfills {
+        actions.push(Action::RequestBackfill {
+            conditions: conditions.into_iter().collect(),
+            from,
+            until,
+        });
+    }
+}
+
 impl Engine {
     pub fn new(config: EngineConfig) -> Self {
         let limits = RingLimits {
@@ -135,6 +163,7 @@ impl Engine {
             seq: 0,
             now: None,
             markets: BTreeMap::new(),
+            resolved: BTreeSet::new(),
             token_market: HashMap::new(),
             slots: BTreeMap::new(),
             token_slot: HashMap::new(),
@@ -226,17 +255,13 @@ impl Engine {
                 }
             }
             Event::WsMarketResolved { resolved, .. } => {
-                let at = resolved.timestamp_millis().unwrap_or(now);
-                actions.push(Action::RegistryHint(RegistryHint::Resolved {
-                    condition_id: resolved.market.clone(),
-                    at,
-                }));
-                actions.push(Action::Persist(Record::Resolution {
-                    condition_id: resolved.market.clone(),
-                    winning_token: resolved.winning_asset_id.clone(),
-                    resolved_at: at,
-                    source: "websocket".into(),
-                }));
+                if !self.markets.contains_key(&resolved.market) {
+                    // Broadcast for every market, and once per connection.
+                    self.counters
+                        .add("ws_untracked_market", "market_resolved", 1);
+                } else {
+                    self.on_resolved(&resolved, now, &mut actions);
+                }
             }
             Event::WsNewMarket { .. } => {
                 actions.push(Action::RegistryHint(RegistryHint::NewMarket))
@@ -269,35 +294,67 @@ impl Engine {
                 complete,
                 from,
                 until,
-            } => {
-                let tokens = self.markets.get(&condition).map(|m| m.info.tokens.clone());
-                if let (Some(volume), Some(tokens)) = (self.volumes.get_mut(&condition), tokens) {
-                    let counts = volume.merge_backfill(
-                        &condition,
-                        &tokens,
-                        &prints,
-                        complete,
-                        (from, until),
-                        now,
-                    )?;
-                    self.counters.add("backfill_rows", "kept", counts.kept);
-                    self.counters
-                        .add("backfill_rows", "seen_live", counts.seen_live);
-                    self.counters
-                        .add("backfill_rows", "outside", counts.outside);
-                    self.counters
-                        .add("backfill_rows", "invalid", counts.invalid);
-                    self.counters.add(
-                        "backfills",
-                        if complete { "complete" } else { "incomplete" },
-                        1,
-                    );
-                }
-            }
+            } => self.on_backfill(&condition, &prints, complete, (from, until), now)?,
             Event::Tick => {}
         }
         self.housekeeping(now, &mut actions);
         Ok(actions)
+    }
+
+    /// A tracked market resolved. Every connection carries the event, so only the first
+    /// copy is kept.
+    fn on_resolved(
+        &mut self,
+        resolved: &MarketResolvedEvent,
+        now: UtcMicros,
+        actions: &mut Vec<Action>,
+    ) {
+        if !self.resolved.insert(resolved.market.clone()) {
+            self.counters.add("ws_duplicate", "market_resolved", 1);
+            return;
+        }
+        // An exchange time from the future must not hold the market in its grace period.
+        let at = resolved.timestamp_millis().map_or(now, |at| at.min(now));
+        actions.push(Action::RegistryHint(RegistryHint::Resolved {
+            condition_id: resolved.market.clone(),
+            at,
+        }));
+        actions.push(Action::Persist(Record::Resolution {
+            condition_id: resolved.market.clone(),
+            winning_token: resolved.winning_asset_id.clone(),
+            resolved_at: at,
+            source: "websocket".into(),
+        }));
+    }
+
+    fn on_backfill(
+        &mut self,
+        condition: &ConditionId,
+        prints: &[BackfillPrint],
+        complete: bool,
+        interval: (UtcMicros, UtcMicros),
+        now: UtcMicros,
+    ) -> Result<(), InvariantViolation> {
+        let tokens = self.markets.get(condition).map(|m| m.info.tokens.clone());
+        let (Some(volume), Some(tokens)) = (self.volumes.get_mut(condition), tokens) else {
+            // Removed since it was requested.
+            self.counters.add("backfill_untracked", "", 1);
+            return Ok(());
+        };
+        let counts = volume.merge_backfill(condition, &tokens, prints, complete, interval, now)?;
+        self.counters.add("backfill_rows", "kept", counts.kept);
+        self.counters
+            .add("backfill_rows", "seen_live", counts.seen_live);
+        self.counters
+            .add("backfill_rows", "outside", counts.outside);
+        self.counters
+            .add("backfill_rows", "invalid", counts.invalid);
+        self.counters.add(
+            "backfills",
+            if complete { "complete" } else { "incomplete" },
+            1,
+        );
+        Ok(())
     }
 
     fn on_book(
@@ -398,7 +455,7 @@ impl Engine {
         };
         state.connected_since = Some(now);
         state.last_message_at = Some(now);
-        let tokens = self.own_tokens(slot, tokens);
+        let tokens = self.slot_tokens(slot, tokens);
         let tokens = tokens.as_slice();
         for token in tokens {
             if let Some(book) = self.books.get_mut(token) {
@@ -408,45 +465,42 @@ impl Engine {
         self.start_live(tokens, now, actions);
     }
 
-    /// The tokens of a lifecycle event that this slot carries (an event can name tokens
-    /// unsubscribed since).
-    fn own_tokens(&self, slot: &ConnSlotId, tokens: &[TokenId]) -> Vec<TokenId> {
-        tokens
-            .iter()
-            .filter(|token| self.token_slot.get(*token) == Some(slot))
-            .cloned()
-            .collect()
+    /// The tokens a lifecycle event of `slot` concerns: every token the engine placed on the
+    /// slot (all share its connection, including any whose `Subscribe` the connection had not
+    /// applied when the event was made), plus any the event names that the slot still
+    /// carries (an event can name tokens unsubscribed since).
+    fn slot_tokens(&self, slot: &ConnSlotId, tokens: &[TokenId]) -> Vec<TokenId> {
+        let mut own: BTreeSet<TokenId> = self
+            .slots
+            .get(slot)
+            .map(|state| state.tokens.clone())
+            .unwrap_or_default();
+        own.extend(
+            tokens
+                .iter()
+                .filter(|token| self.token_slot.get(*token) == Some(slot))
+                .cloned(),
+        );
+        own.into_iter().collect()
     }
 
     /// Live prints of `tokens`' markets flow from `now`: asks for the backfill each needs (the
     /// whole window the first time, the gap after a disconnect).
     fn start_live(&mut self, tokens: &[TokenId], now: UtcMicros, actions: &mut Vec<Action>) {
         let lookback = delta(self.config.volume_window) + delta(self.config.volume_slack);
-        let mut backfills: BTreeMap<(UtcMicros, UtcMicros), BTreeSet<ConditionId>> =
-            BTreeMap::new();
-        for token in tokens {
-            let Some(condition) = self.token_market.get(token) else {
-                continue;
-            };
-            if backfills.values().any(|set| set.contains(condition)) {
-                continue;
-            }
-            if let Some(volume) = self.volumes.get_mut(condition)
+        let conditions: BTreeSet<ConditionId> = tokens
+            .iter()
+            .filter_map(|token| self.token_market.get(token).cloned())
+            .collect();
+        let mut backfills = Backfills::new();
+        for condition in conditions {
+            if let Some(volume) = self.volumes.get_mut(&condition)
                 && let Some(interval) = volume.connected(now, lookback)
             {
-                backfills
-                    .entry(interval)
-                    .or_default()
-                    .insert(condition.clone());
+                backfills.entry(interval).or_default().insert(condition);
             }
         }
-        for ((from, until), conditions) in backfills {
-            actions.push(Action::RequestBackfill {
-                conditions: conditions.into_iter().collect(),
-                from,
-                until,
-            });
-        }
+        push_backfills(backfills, actions);
     }
 
     fn on_conn_down(&mut self, slot: &ConnSlotId, tokens: &[TokenId], now: UtcMicros) {
@@ -458,7 +512,7 @@ impl Engine {
         state.connected_since = None;
         // Prints may be missing since the last message, not just since the loss was noticed.
         let last_message = state.last_message_at.map_or(now, |at| at.min(now));
-        for token in &self.own_tokens(slot, tokens) {
+        for token in &self.slot_tokens(slot, tokens) {
             if let Some(book) = self.books.get_mut(token) {
                 book.distrust_from(Distrust::Disconnected, now);
             }
@@ -484,37 +538,61 @@ impl Engine {
             self.counters.add("stale_lifecycle", "decode_error", 1);
             return;
         };
-        let mut carried: BTreeSet<TokenId> = state.tokens.clone();
-        carried.extend(self.own_tokens(&slot, tokens));
+        let pending = state.decode_errors;
+        let carried = self.slot_tokens(&slot, tokens);
         for token in &carried {
             if let Some(book) = self.books.get_mut(token) {
                 book.distrust_from(Distrust::DecodeError, now);
             }
         }
         // The lost message may have been a trade: refetch that moment's prints.
-        let conditions: BTreeSet<ConditionId> = carried
-            .iter()
-            .filter_map(|token| self.token_market.get(token).cloned())
-            .collect();
-        let mut backfills: BTreeMap<(UtcMicros, UtcMicros), Vec<ConditionId>> = BTreeMap::new();
+        let conditions = self.conditions_of(&carried);
+        if let Some(pending) = pending {
+            // A resnapshot is already due: a recurring bad message must not set off a
+            // backfill and a resubscribe each time, so this one waits for it.
+            self.counters.add("decode_errors_coalesced", "", 1);
+            for condition in &conditions {
+                if let Some(volume) = self.volumes.get_mut(condition) {
+                    volume.suspect(now);
+                }
+            }
+            if let Some(state) = self.slots.get_mut(&slot) {
+                state.decode_errors = Some(DecodeErrors {
+                    last: now,
+                    coalesced_from: Some(pending.coalesced_from.unwrap_or(now)),
+                });
+            }
+            return;
+        }
+        let mut backfills = Backfills::new();
         for condition in conditions {
             if let Some(interval) = self
                 .volumes
                 .get_mut(&condition)
                 .and_then(|volume| volume.lost_message(now))
             {
-                backfills.entry(interval).or_default().push(condition);
+                backfills.entry(interval).or_default().insert(condition);
             }
         }
-        for ((from, until), conditions) in backfills {
-            actions.push(Action::RequestBackfill {
-                conditions,
-                from,
-                until,
+        push_backfills(backfills, actions);
+        if let Some(state) = self.slots.get_mut(&slot) {
+            state.decode_errors = Some(DecodeErrors {
+                last: now,
+                coalesced_from: None,
             });
         }
         let due = now + delta(self.config.resnapshot_after_decode_error);
-        self.schedule(due, Timer::Resnapshot { slot, since: now });
+        self.schedule(due, Timer::Resnapshot { slot });
+    }
+
+    fn conditions_of<'a>(
+        &self,
+        tokens: impl IntoIterator<Item = &'a TokenId>,
+    ) -> BTreeSet<ConditionId> {
+        tokens
+            .into_iter()
+            .filter_map(|token| self.token_market.get(token).cloned())
+            .collect()
     }
 
     fn on_registry(
@@ -526,9 +604,29 @@ impl Engine {
         actions: &mut Vec<Action>,
     ) -> Result<(), InvariantViolation> {
         // Removals first: a market whose tokens changed is removed and added again.
+        let remove: Vec<RemovedMarket> = remove
+            .into_iter()
+            .filter(|removed| {
+                let tracked = self
+                    .markets
+                    .get(&removed.condition_id)
+                    .is_some_and(|m| m.info.tokens == removed.tokens);
+                if !tracked {
+                    // Never added (rejected below), or already gone.
+                    self.counters.add("registry_ignored", "remove", 1);
+                }
+                tracked
+            })
+            .collect();
         let removed_tokens: Vec<MarketTokens> = remove.iter().map(|r| r.tokens.clone()).collect();
         for (slot, tokens) in self.assignment.unassign(&removed_tokens) {
-            let state = self.slots.entry(slot.clone()).or_default();
+            let Some(state) = self.slots.get_mut(&slot) else {
+                invariant!(
+                    self.slots.contains_key(&slot),
+                    Err(InvariantViolation("an assigned slot is open"))
+                );
+                continue;
+            };
             for token in &tokens {
                 state.tokens.remove(token);
             }
@@ -551,8 +649,10 @@ impl Engine {
             }
             self.markets.remove(&removed.condition_id);
             self.volumes.remove(&removed.condition_id);
+            self.resolved.remove(&removed.condition_id);
         }
 
+        let add = self.acceptable(add);
         let added_tokens: Vec<MarketTokens> = add.iter().map(|m| m.info.tokens.clone()).collect();
         for market in add {
             let id = market.info.condition_id.clone();
@@ -596,8 +696,7 @@ impl Engine {
                         slot.clone(),
                         SlotState {
                             tokens: tokens.iter().cloned().collect(),
-                            connected_since: None,
-                            last_message_at: None,
+                            ..SlotState::default()
                         },
                     );
                     actions.push(Action::OpenSlot { slot, tokens });
@@ -632,6 +731,31 @@ impl Engine {
         Ok(())
     }
 
+    /// The added markets that can be tracked: remote data must not break the engine's
+    /// one-token-one-market bookkeeping, so a market already tracked, or sharing a token with
+    /// one, is skipped (and stays untracked: its later removal or change is ignored too).
+    fn acceptable(&mut self, add: Vec<LiveMarket>) -> Vec<LiveMarket> {
+        let mut tokens: BTreeSet<TokenId> = BTreeSet::new();
+        let mut accepted = Vec::with_capacity(add.len());
+        for market in add {
+            let info = &market.info;
+            let fresh = !self.markets.contains_key(&info.condition_id)
+                && info.tokens.yes != info.tokens.no
+                && [&info.tokens.yes, &info.tokens.no]
+                    .into_iter()
+                    .all(|token| !self.token_market.contains_key(token) && !tokens.contains(token));
+            if !fresh {
+                tracing::warn!(condition = %info.condition_id, "skipping a market already tracked or sharing a token");
+                self.counters.add("registry_ignored", "add", 1);
+                continue;
+            }
+            tokens.insert(info.tokens.yes.clone());
+            tokens.insert(info.tokens.no.clone());
+            accepted.push(market);
+        }
+        accepted
+    }
+
     fn schedule(&mut self, due: UtcMicros, timer: Timer) {
         self.next_timer += 1;
         self.timers.insert((due, self.next_timer), timer);
@@ -644,32 +768,66 @@ impl Engine {
                 break;
             }
             match entry.remove() {
-                Timer::Resnapshot { slot, since } => {
-                    let Some(state) = self.slots.get(&slot) else {
-                        continue;
-                    };
-                    let waiting: Vec<TokenId> = state
-                        .tokens
-                        .iter()
-                        .filter(|token| {
-                            self.books.get(*token).is_some_and(|book| {
-                                book.distrust() == Some(Distrust::DecodeError)
-                                    && book.untrusted_since().is_some_and(|at| at <= since)
-                            })
-                        })
-                        .cloned()
-                        .collect();
-                    if !waiting.is_empty() && state.connected() {
-                        self.counters.add("resnapshots", "", 1);
-                        actions.push(Action::Resnapshot {
-                            slot,
-                            tokens: waiting,
-                        });
-                    }
-                }
+                Timer::Resnapshot { slot } => self.resnapshot(slot, now, &mut actions),
             }
         }
         actions
+    }
+
+    /// A decode error's resnapshot is due: resubscribes the slot's tokens still untrusted from
+    /// its errors, and backfills the errors coalesced into it.
+    fn resnapshot(&mut self, slot: ConnSlotId, now: UtcMicros, actions: &mut Vec<Action>) {
+        let Some(state) = self.slots.get_mut(&slot) else {
+            return;
+        };
+        let Some(errors) = state.decode_errors.take() else {
+            // Only `on_decode_error` schedules this timer, and it sets the errors first.
+            tracing::error!(%slot, "a resnapshot is due with no decode errors recorded");
+            return;
+        };
+        let connected = state.connected();
+        let carried: Vec<TokenId> = state.tokens.iter().cloned().collect();
+        let waiting: Vec<TokenId> = carried
+            .iter()
+            .filter(|token| {
+                self.books.get(*token).is_some_and(|book| {
+                    book.distrust() == Some(Distrust::DecodeError)
+                        && book.untrusted_since().is_some_and(|at| at <= errors.last)
+                })
+            })
+            .cloned()
+            .collect();
+        let resubscribing = !waiting.is_empty() && connected;
+        let resubscribed = self.conditions_of(&waiting);
+        if resubscribing {
+            self.counters.add("resnapshots", "", 1);
+            actions.push(Action::Resnapshot {
+                slot,
+                tokens: waiting,
+            });
+        }
+        // Prints lost to the errors coalesced into this one, and to the resubscribe itself
+        // (a trade between the unsubscribe and the subscribe).
+        let mut backfills = Backfills::new();
+        for condition in self.conditions_of(&carried) {
+            let lost = match (
+                errors.coalesced_from,
+                resubscribed.contains(&condition) && resubscribing,
+            ) {
+                (Some(from), resub) => Some((from, if resub { now } else { errors.last })),
+                (None, true) => Some((now, now)),
+                (None, false) => None,
+            };
+            if let Some((from, until)) = lost
+                && let Some(interval) = self
+                    .volumes
+                    .get_mut(&condition)
+                    .and_then(|volume| volume.lost_messages(from, until))
+            {
+                backfills.entry(interval).or_default().insert(condition);
+            }
+        }
+        push_backfills(backfills, actions);
     }
 
     /// Counters not yet written, as metrics: for a clean shutdown.
@@ -761,13 +919,17 @@ fn fee_record(market: &LiveMarket) -> Record {
 }
 
 fn observation_metric(seen: Observation) -> Action {
-    let value = seen.exchange_delta.map_or(f64::NAN, |d| {
-        d.num_microseconds().unwrap_or(0) as f64 / 1000.0
-    });
-    Action::Persist(Record::Metric(
-        Metric::new("ws_trade_vs_price_change_ms", seen.at, value)
-            .label("order", seen.arrival.as_str()),
-    ))
+    // No exchange delta (a trade with no matching change): a count, not a NaN, which would
+    // neither serialise nor compare equal on replay.
+    let metric = match seen.exchange_delta {
+        Some(d) => Metric::new(
+            "ws_trade_vs_price_change_ms",
+            seen.at,
+            d.num_microseconds().unwrap_or(0) as f64 / 1000.0,
+        ),
+        None => Metric::new("ws_trade_vs_price_change_unmatched", seen.at, 1.0),
+    };
+    Action::Persist(Record::Metric(metric.label("order", seen.arrival.as_str())))
 }
 
 #[cfg(test)]

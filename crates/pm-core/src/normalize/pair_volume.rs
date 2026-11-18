@@ -73,8 +73,13 @@ impl PairVolume {
     }
 
     /// Adds a print. Returns `false` if it was dropped as a duplicate of the same
-    /// transaction on the sibling token, or is too old to matter.
+    /// transaction on the sibling token, is too old to matter, or is too large to add (an
+    /// absurd size from the remote side must not overflow the running total).
     pub fn record(&mut self, print: &NormalisedPrint) -> bool {
+        invariant!(
+            self.total.checked_add(print.notional.value()).is_some(),
+            false
+        );
         if self
             .evicted_through
             .is_some_and(|through| print.exchange_ts <= through)

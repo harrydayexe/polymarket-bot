@@ -88,6 +88,8 @@ pub enum MarketParseError {
     TokenCount(usize),
     #[error("market outcomes are {0:?}, expected Yes and No")]
     Outcomes(Vec<String>),
+    #[error("market has the same token {0} for both outcomes")]
+    SameToken(TokenId),
 }
 
 impl MarketInfo {
@@ -100,6 +102,9 @@ impl MarketInfo {
         let token_ids = market.clob_token_ids.ok_or(Missing("clob_token_ids"))?;
         let [t0, t1] = <[TokenId; 2]>::try_from(token_ids)
             .map_err(|ids| MarketParseError::TokenCount(ids.len()))?;
+        if t0 == t1 {
+            return Err(MarketParseError::SameToken(t0));
+        }
 
         let tokens = match outcomes.as_slice() {
             [a, b] if a == "Yes" && b == "No" => MarketTokens { yes: t0, no: t1 },
@@ -183,6 +188,12 @@ mod tests {
     fn rejects_one_token() {
         let err = parse(json!({ "clobTokenIds": "[\"111\"]" })).unwrap_err();
         assert_eq!(err, MarketParseError::TokenCount(1));
+    }
+
+    #[test]
+    fn rejects_the_same_token_twice() {
+        let err = parse(json!({ "clobTokenIds": "[\"111\", \"111\"]" })).unwrap_err();
+        assert_eq!(err, MarketParseError::SameToken(TokenId::new("111")));
     }
 
     #[test]

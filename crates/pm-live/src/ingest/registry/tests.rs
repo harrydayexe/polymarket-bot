@@ -137,7 +137,7 @@ async fn without_a_gamma_schedule_fees_come_from_the_clob_then_the_table() {
     assert_eq!(add[0].fees.source, FeeSource::Clob);
     assert_eq!(add[0].fees.rate, dec!(0.05));
     assert_eq!(add[0].fees.seen_at, first);
-    // The CLOB fails (500) once: its last answer stands, no change.
+    // Within the TTL the CLOB is not asked again.
     assert!(
         state
             .poll(&gamma, &clob, at("2026-11-19T12:00:30Z"))
@@ -145,9 +145,18 @@ async fn without_a_gamma_schedule_fees_come_from_the_clob_then_the_table() {
             .unwrap()
             .is_none()
     );
+    assert_eq!(clob.calls.load(Ordering::SeqCst), 1);
+    // The CLOB fails (500) once: its last answer stands, no change.
+    assert!(
+        state
+            .poll(&gamma, &clob, at("2026-11-19T12:15:00Z"))
+            .await
+            .unwrap()
+            .is_none()
+    );
     // It then has no fee details: the table row in force, politics at its higher rate.
     clob.answer(Ok(None));
-    let second = at("2026-11-19T12:01:00Z");
+    let second = at("2026-11-19T12:30:00Z");
     let (_, _, changed) = unpack(state.poll(&gamma, &clob, second).await.unwrap());
     assert_eq!(changed.len(), 1);
     let fees = changed[0].market.fees;
@@ -160,8 +169,28 @@ async fn without_a_gamma_schedule_fees_come_from_the_clob_then_the_table() {
     assert_eq!(
         clob.calls.load(Ordering::SeqCst),
         3,
-        "the CLOB is asked whenever Gamma has no schedule"
+        "the CLOB is asked once per TTL while Gamma has no schedule"
     );
+}
+
+#[tokio::test]
+async fn a_clob_error_keeps_fees_last_read_from_gamma() {
+    let gamma = FakeGamma::default();
+    gamma.set(vec![with_fees(1, json!(0.01))]);
+    let clob = FakeClob::default();
+    let mut state = RegistryState::new(&config(), table());
+    let now = at("2026-11-21T00:00:00Z");
+    unpack(state.poll(&gamma, &clob, now).await.unwrap());
+    // Gamma drops the schedule for a poll and the CLOB fails: not a fee change.
+    gamma.set(vec![gamma_market(1, json!({}))]);
+    assert!(
+        state
+            .poll(&gamma, &clob, at("2026-11-21T00:01:00Z"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(clob.calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
