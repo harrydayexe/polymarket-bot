@@ -1,0 +1,50 @@
+# pmlive configuration (Phase 1 spec, C2). Every key is optional; these are the defaults.
+
+[run]
+data_dir = "./pmlive-data"                      # engine_log/ and records/ go here
+fee_table = "config/fee_schedule_history.toml"   # dated fee fallback (§3.7)
+
+[endpoints]
+gamma = "https://gamma-api.polymarket.com"
+clob = "https://clob.polymarket.com"
+data = "https://data-api.polymarket.com"
+ws = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+geoblock = "https://polymarket.com"
+
+[http]
+timeout = "30s"
+connect_timeout = "10s"
+max_retries = 2
+meta_rps = 10             # Gamma, CLOB, geoblock
+meta_burst = 1
+data_priority_rps = 6     # identity resolver, window features (D12)
+data_priority_burst = 3
+data_bulk_rps = 4         # volume backfill, wallet paging; priority + bulk <= 10
+data_bulk_burst = 1
+
+[ingest]
+# Keep the universe equal to the archive's: same tags and liquidity floor as the deployed
+# archiver's config.
+category_tags = ["politics", "geopolitics"]
+min_liquidity_usd = 50000
+registry_interval = "60s"
+new_market_min_gap = "30s"    # new_market hints bring the next poll forward, no closer than this
+closed_grace_period = "6h"
+tokens_per_connection = 250
+backfill_concurrency = 2
+backfill_max_pages = 50
+reconnect_initial_backoff = "1s"
+reconnect_max_backoff = "30s"
+reconnect_stable_after = "30s"
+connect_timeout = "10s"
+heartbeat_interval = "10s"
+idle_timeout = "30s"
+resnapshot_after_decode_error = "10s"
+
+[engine]
+book_ring_window = "5s"
+book_ring_capacity = 256
+untrusted_alarm_after = "2m"
+volume_window = "24h"
+volume_slack = "10m"
+metrics_interval = "60s"

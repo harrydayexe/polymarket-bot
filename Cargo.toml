@@ -2,6 +2,17 @@
 resolver = "3"
 members = ["archiver", "crates/*"]
 
+# Declared once so the archiver and the shared crates cannot drift.
+[workspace.dependencies]
+marcasite = { version = "0.3.0", default-features = false, features = [
+    "clob",
+    "data",
+    "gamma",
+    "ws",
+    "geoblock",
+] }
+marcasite-core = "0.3.0"
+
 [profile.release]
 # A panic anywhere stops the process, so the supervisor restarts it and the next start
 # records the gap, rather than a task dying silently while the rest keeps running.

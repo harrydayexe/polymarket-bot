@@ -1,7 +1,9 @@
 //! Helpers for tests, in this crate and in crates that depend on it (feature `test-util`).
 //!
 //! Also re-exports the test doubles that live with what they stand in for:
-//! [TokioClock] and [ScriptedRandom].
+//! [TokioClock] and [ScriptedRandom]. [fake_ws] is a fake market channel server.
+
+pub mod fake_ws;
 
 use std::time::Duration;
 

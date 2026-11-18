@@ -336,6 +336,8 @@ mod tests {
             tick_size: Some("0.01".parse().unwrap()),
             neg_risk: false,
             fetched_at: ts(),
+            fees_enabled: None,
+            fee_params: None,
         };
         let record = Record::Market {
             recv_ts: ts(),

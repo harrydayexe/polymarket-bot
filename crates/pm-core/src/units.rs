@@ -48,10 +48,8 @@ pub enum UnitError {
     Probability(f64),
     #[error("logit of {0} is infinite; it needs a probability strictly between 0 and 1")]
     LogitUndefined(f64),
-    #[error("fee rate {0} is negative")]
-    FeeRate(Decimal),
-    #[error("fee exponent {0} is not a whole number between 0 and {MAX_FEE_EXPONENT}")]
-    FeeExponent(Decimal),
+    #[error("invalid fee parameters or inputs: {0}")]
+    Fee(String),
     #[error(transparent)]
     Invariant(#[from] InvariantViolation),
 }
@@ -387,86 +385,114 @@ pub fn inv_logit(x: Logit) -> Probability {
     Probability(p)
 }
 
-/// Largest fee exponent accepted by [fee_per_share].
-pub const MAX_FEE_EXPONENT: u32 = 16;
+/// The exponent every live market has sent so far (marcasite, 18 Nov 2026). Any other value
+/// is accepted, but results computed with it are flagged `fee_exponent_unverified` (§3.7).
+pub const VERIFIED_FEE_EXPONENT: u32 = 1;
 
-/// The taker fee per share bought or sold at `price`: `rate × (p × (1 − p))^exponent`
-/// (§3.7). Polymarket's published curve has exponent 1: `fee = shares × rate × p × (1 − p)`.
-/// Exact; the caller rounds the total.
+/// Decimal places of a charged fee (D14): Polymarket charges fees to 5 places.
+pub const FEE_DP: u32 = marcasite_core::fees::FEE_DECIMALS;
+
+/// Where a market's fee parameters came from (§3.7, D13), in order of preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeeSource {
+    /// Gamma `Market.feeSchedule`, read on every registry poll.
+    Gamma,
+    /// CLOB `/clob-markets/{condition_id}` `fee_details`.
+    Clob,
+    /// The dated table in `config/fee_schedule_history.toml`.
+    Fallback,
+    /// The dated table, for a category whose coefficient the table cannot pin down (politics:
+    /// elections or not), so the higher one in force was used.
+    FallbackConservative,
+}
+
+impl FeeSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FeeSource::Gamma => "gamma",
+            FeeSource::Clob => "clob",
+            FeeSource::Fallback => "fallback",
+            FeeSource::FallbackConservative => "fallback_conservative",
+        }
+    }
+}
+
+/// A market's taker fee parameters, where they came from and when they were seen: stored
+/// alongside every use of a fee (rule 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeeParams {
+    pub rate: Decimal,
+    pub exponent: u32,
+    pub source: FeeSource,
+    #[serde(with = "micros")]
+    pub seen_at: UtcMicros,
+}
+
+impl FeeParams {
+    /// Whether the exponent is one no live market has been seen to send, so fees computed
+    /// with it rest on marcasite's reading of the formula (open question 25).
+    pub fn exponent_unverified(&self) -> bool {
+        self.exponent != VERIFIED_FEE_EXPONENT
+    }
+
+    /// The same parameters with the rate and exponent compared, ignoring source and time:
+    /// whether a newly seen schedule is a change (D13).
+    pub fn same_curve(&self, other: &FeeParams) -> bool {
+        self.rate == other.rate && self.exponent == other.exponent
+    }
+}
+
+fn fee_error(err: marcasite_core::Error) -> UnitError {
+    UnitError::Fee(err.to_string())
+}
+
+/// The unrounded taker fee per share bought or sold at `price` under `params`:
+/// `rate × (p × (1 − p))^exponent` (§3.7), computed by [marcasite_core::fees::taker_fee].
+/// Scores and gates use this value (`φ`, `q*`).
 ///
 /// # Errors
 ///
-/// If `rate` is negative or `exponent` is not a whole number in 0..=[MAX_FEE_EXPONENT].
-pub fn fee_per_share(price: Price, rate: Decimal, exponent: Decimal) -> Result<Usd, UnitError> {
-    if rate < Decimal::ZERO {
-        return Err(UnitError::FeeRate(rate));
-    }
-    let power = exponent
-        .normalize()
-        .is_integer()
-        .then(|| exponent.to_u32())
-        .flatten()
-        .filter(|&e| e <= MAX_FEE_EXPONENT)
-        .ok_or(UnitError::FeeExponent(exponent))?;
-    let p = price.value();
-    let base = p * (Decimal::ONE - p);
-    let curve = (0..power).fold(Decimal::ONE, |acc, _| acc * base);
-    let fee = rate * curve;
-    // p(1 − p) peaks at 1/4, so the fee can never exceed the rate times 1/4^exponent.
+/// If the rate is negative or the exponent is beyond what marcasite accepts.
+pub fn fee_per_share(price: Price, params: &FeeParams) -> Result<Usd, UnitError> {
+    let fee =
+        marcasite_core::fees::taker_fee(Decimal::ONE, price.value(), params.rate, params.exponent)
+            .map_err(fee_error)?;
     invariant!(
-        (Decimal::ZERO..=Decimal::new(25, 2)).contains(&base),
-        Err(InvariantViolation("p(1 − p) is in [0, 1/4]").into())
+        fee >= Decimal::ZERO,
+        Err(InvariantViolation("a taker fee is not negative").into())
     );
     invariant!(
-        fee >= Decimal::ZERO && fee <= rate,
-        Err(InvariantViolation("fee per share is between 0 and the rate").into())
+        fee <= params.rate.max(Decimal::ZERO),
+        Err(InvariantViolation("fee per share is at most the rate").into())
     );
     Ok(Usd(fee))
 }
 
-/// Where a market's fee parameters came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FeeSource {
-    /// The CLOB market's `fee_details`.
-    Market,
-    /// [FeeSchedule::fallback], because the market's were unavailable.
-    Fallback,
-}
-
-/// A market's fee curve parameters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FeeSchedule {
-    pub rate: Decimal,
-    pub exponent: Decimal,
-    pub source: FeeSource,
-}
-
-impl FeeSchedule {
-    /// The fallback for a category tag when the market's own parameters are unavailable
-    /// (§3.7): geopolitics is fee-free, politics pays 0.04 with exponent 1, as published
-    /// by Polymarket in November 2026. `None` for other categories.
-    pub fn fallback(category: &str) -> Option<FeeSchedule> {
-        let rate = match category {
-            "geopolitics" => Decimal::ZERO,
-            "politics" => Decimal::new(4, 2),
-            _ => return None,
-        };
-        Some(FeeSchedule {
-            rate,
-            exponent: Decimal::ONE,
-            source: FeeSource::Fallback,
-        })
-    }
-
-    /// [fee_per_share] under this schedule.
-    ///
-    /// # Errors
-    ///
-    /// As [fee_per_share].
-    pub fn per_share(&self, price: Price) -> Result<Usd, UnitError> {
-        fee_per_share(price, self.rate, self.exponent)
-    }
+/// The fee charged for a taker fill of `shares` at `price` (paper fills): the unrounded fee
+/// rounded half-even to [FEE_DP] places (D14), so anything below 0.000005 is zero.
+///
+/// # Errors
+///
+/// As [fee_per_share].
+pub fn fee_charged(shares: Shares, price: Price, params: &FeeParams) -> Result<Usd, UnitError> {
+    let fee = marcasite_core::fees::taker_fee(
+        shares.value(),
+        price.value(),
+        params.rate,
+        params.exponent,
+    )
+    .map_err(fee_error)?;
+    let charged = fee.round_dp_with_strategy(FEE_DP, RoundingStrategy::MidpointNearestEven);
+    invariant!(
+        charged >= Decimal::ZERO,
+        Err(InvariantViolation("a charged fee is not negative").into())
+    );
+    invariant!(
+        (charged - fee).abs() <= Decimal::new(5, FEE_DP + 1),
+        Err(InvariantViolation("rounding moves a fee by at most half a unit").into())
+    );
+    Ok(Usd(charged))
 }
 
 #[cfg(test)]
@@ -591,12 +617,21 @@ mod tests {
         }
     }
 
+    fn params(rate: Decimal, exponent: u32) -> FeeParams {
+        FeeParams {
+            rate,
+            exponent,
+            source: FeeSource::Gamma,
+            seen_at: DateTime::from_timestamp_micros(0).unwrap(),
+        }
+    }
+
     /// Polymarket's published fee table (100 shares), shown rounded to cents: politics pays
     /// 0.04 (peak $1.00 at 50¢), crypto 0.07 (peak $1.75), sports 0.05 (peak $1.25).
     #[test]
     fn fee_matches_the_published_table() {
         let fee_100 = |p: Decimal, rate: Decimal| {
-            (fee_per_share(price(p), rate, dec!(1)).unwrap() * 100)
+            (fee_per_share(price(p), &params(rate, 1)).unwrap() * 100)
                 .round_dp_with_strategy(2, RoundingStrategy::MidpointAwayFromZero)
         };
         let table = [
@@ -618,7 +653,7 @@ mod tests {
         }
         // Exact before display rounding: crypto at 1¢ is 0.0693 per 100 shares.
         assert_eq!(
-            fee_per_share(price(dec!(0.01)), dec!(0.07), dec!(1)).unwrap() * 100,
+            fee_per_share(price(dec!(0.01)), &params(dec!(0.07), 1)).unwrap() * 100,
             dec!(0.0693)
         );
     }
@@ -634,42 +669,69 @@ mod tests {
     #[test]
     fn fee_exponent() {
         // (0.5 × 0.5)^2 × 0.02 = 0.00125.
+        let squared = params(dec!(0.02), 2);
         assert_eq!(
-            fee_per_share(price(dec!(0.5)), dec!(0.02), dec!(2)).unwrap(),
+            fee_per_share(price(dec!(0.5)), &squared).unwrap(),
             Usd::new(dec!(0.00125))
         );
+        assert!(squared.exponent_unverified());
+        assert!(!params(dec!(0.02), 1).exponent_unverified());
+        assert!(fee_per_share(price(dec!(0.5)), &params(dec!(-0.01), 1)).is_err());
+        assert!(fee_per_share(price(dec!(0.5)), &params(dec!(0.01), 99)).is_err());
         assert_eq!(
-            fee_per_share(price(dec!(0.3)), dec!(0.04), dec!(0)).unwrap(),
-            Usd::new(dec!(0.04))
-        );
-        assert_eq!(
-            fee_per_share(price(dec!(0.5)), dec!(0.02), dec!(1.5)),
-            Err(UnitError::FeeExponent(dec!(1.5)))
-        );
-        assert_eq!(
-            fee_per_share(price(dec!(0.5)), dec!(0.02), dec!(2.0)).unwrap(),
-            Usd::new(dec!(0.00125))
-        );
-        assert!(fee_per_share(price(dec!(0.5)), dec!(-0.01), dec!(1)).is_err());
-        assert!(fee_per_share(price(dec!(0.5)), dec!(0.01), dec!(17)).is_err());
-        assert_eq!(
-            fee_per_share(Price::ONE, dec!(0.04), dec!(1)).unwrap(),
+            fee_per_share(Price::ONE, &params(dec!(0.04), 1)).unwrap(),
             Usd::ZERO
         );
     }
 
     #[test]
-    fn fallback_schedules() {
-        let politics = FeeSchedule::fallback("politics").unwrap();
-        assert_eq!(politics.rate, dec!(0.04));
-        assert_eq!(politics.source, FeeSource::Fallback);
+    fn charged_fee_is_rounded_half_even_to_five_places() {
+        let shares = |d: Decimal| Shares::new(d).unwrap();
+        // 1 share at 0.5, rate 0.00002: 0.000005 exactly, a tie that rounds to even (0).
         assert_eq!(
-            politics.per_share(price(dec!(0.5))).unwrap(),
-            Usd::new(dec!(0.01))
+            fee_charged(shares(dec!(1)), price(dec!(0.5)), &params(dec!(0.00002), 1)).unwrap(),
+            Usd::ZERO
         );
-        let geo = FeeSchedule::fallback("geopolitics").unwrap();
-        assert_eq!(geo.per_share(price(dec!(0.5))).unwrap(), Usd::ZERO);
-        assert_eq!(FeeSchedule::fallback("sports"), None);
+        // 3 shares: 0.000015, a tie that rounds to even (0.00002).
+        assert_eq!(
+            fee_charged(shares(dec!(3)), price(dec!(0.5)), &params(dec!(0.00002), 1)).unwrap(),
+            Usd::new(dec!(0.00002))
+        );
+        assert_eq!(
+            fee_charged(shares(dec!(100)), price(dec!(0.5)), &params(dec!(0.07), 1)).unwrap(),
+            Usd::new(dec!(1.75))
+        );
+    }
+
+    #[test]
+    fn fees_match_the_shared_fixture() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/fees/taker_fee.json"
+        );
+        let fixture: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let dec = |v: &serde_json::Value| -> Decimal { v.as_str().unwrap().parse().unwrap() };
+        for case in fixture["cases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let fee_params = params(
+                dec(&case["rate"]),
+                case["exponent"].as_u64().unwrap() as u32,
+            );
+            let shares = Shares::new(dec(&case["shares"])).unwrap();
+            let p = price(dec(&case["price"]));
+            let per_share = fee_per_share(p, &fee_params).unwrap();
+            assert_eq!(
+                per_share.value() * shares.value(),
+                dec(&case["fee"]),
+                "{name}"
+            );
+            assert_eq!(
+                fee_charged(shares, p, &fee_params).unwrap().value(),
+                dec(&case["charged"]),
+                "{name}"
+            );
+        }
     }
 
     #[test]

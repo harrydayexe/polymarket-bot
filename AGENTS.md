@@ -21,5 +21,6 @@ Prefer these recipes over the raw underlying commands.
 |---|---|---|
 | `archiver` | `archiver/` | `just archiver test` |
 | `core` | `crates/pm-core/` | `just core test` |
+| `live` | `crates/pm-live/` | `just live test` |
 
 Each module directory has its own AGENTS.md with module-specific commands. When adding an app or crate, add it to the workspace members if it is Rust, add a `mod <name>` to the root justfile and wire its recipes into the root `ci`, `test`, `lint` and `fmt` recipes.

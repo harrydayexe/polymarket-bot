@@ -111,6 +111,8 @@ fn market(hour: u32) -> Record {
             tick_size: Some("0.01".parse().unwrap()),
             neg_risk: false,
             fetched_at: at(hour, 0),
+            fees_enabled: None,
+            fee_params: None,
         },
     }
 }

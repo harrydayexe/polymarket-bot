@@ -7,17 +7,19 @@ description = "Shared library for the Polymarket archiver and live system: books
 [features]
 # Test helpers other crates use in their own tests: a pausable clock, scripted randomness and
 # market fixtures.
-test-util = ["tokio/test-util"]
+test-util = [
+    "tokio/test-util",
+    "tokio/net",
+    "tokio/rt",
+    "dep:futures-util",
+    "dep:tokio-tungstenite",
+]
 
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["serde", "std"] }
-marcasite = { version = "0.2.0", default-features = false, features = [
-    "clob",
-    "data",
-    "gamma",
-    "ws",
-] }
-marcasite-core = "0.2.0"
+marcasite = { workspace = true }
+marcasite-core = { workspace = true }
+humantime-serde = "1.1.1"
 rand = "0.10.3"
 rand_chacha = "0.10.0"
 rust_decimal = { version = "1.43.0", features = ["serde"] }
@@ -25,7 +27,11 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["raw_value"] }
 thiserror = "2.0.21"
 tokio = { version = "1.53.1", features = ["sync", "time"] }
+toml = "1.1.6"
 tracing = "0.1.44"
+# Feature `test-util` only: the fake market channel server.
+futures-util = { version = "0.3.34", optional = true, features = ["sink"] }
+tokio-tungstenite = { version = "0.30.0", optional = true }
 url = { version = "2.5.8", features = ["serde"] }
 zstd = "0.14.3"
 
@@ -33,4 +39,5 @@ zstd = "0.14.3"
 proptest = "1.12.0"
 rust_decimal_macros = "1.40.0"
 tempfile = "3.27.0"
+wiremock = "0.6.3"
 tokio = { version = "1.53.1", features = ["macros", "rt", "test-util"] }

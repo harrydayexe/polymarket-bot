@@ -97,7 +97,11 @@ impl RawPrint {
             side,
             price: Price::new(event.price)?,
             size: Shares::new(event.size)?,
-            tx_hash: event.transaction_hash.clone().map(TxHash::new),
+            // Lower case, as the Data API sends them, so the two sources' hashes compare.
+            tx_hash: event
+                .transaction_hash
+                .as_deref()
+                .map(|hash| TxHash::new(hash.to_ascii_lowercase())),
             exchange_ts: event.timestamp,
             recv_ts,
         })

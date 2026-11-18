@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use futures::{SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt};
 use tokio::{net::TcpListener, sync::mpsc};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
