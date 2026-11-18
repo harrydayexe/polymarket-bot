@@ -586,3 +586,46 @@ fn price_changes_on_both_tokens_update_both_books() {
     assert_eq!(size(&no(1), BookSide::Ask, dec!(0.59)), Some(dec!(5)));
     assert_eq!(h.engine.book(&yes(1)).unwrap().versions().count(), 2);
 }
+
+#[test]
+fn markets_added_to_a_connected_slot_start_live_volume_at_once() {
+    let mut h = Harness::new();
+    h.add(0, &[1]);
+    h.up(10, &[yes(1), no(1)]);
+    let actions = h.add(HOUR, &[2]);
+    let lookback = TimeDelta::hours(24) + TimeDelta::minutes(10);
+    assert!(actions.contains(&Action::Subscribe {
+        slot: slot(),
+        tokens: vec![yes(2), no(2)]
+    }));
+    assert!(actions.contains(&Action::RequestBackfill {
+        conditions: vec![condition(2)],
+        from: t(HOUR) - lookback,
+        until: t(HOUR),
+    }));
+    // While the slot is down, the next ConnUp starts them instead.
+    h.feed(
+        HOUR + 1,
+        Event::ConnDown {
+            slot: slot(),
+            tokens: vec![yes(1), no(1), yes(2), no(2)],
+            reason: None,
+        },
+    );
+    let actions = h.add(HOUR + 2, &[3]);
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::RequestBackfill { .. }))
+    );
+    let actions = h.up(HOUR + 3, &[yes(1), no(1), yes(2), no(2), yes(3), no(3)]);
+    let backfills: Vec<_> = actions
+        .iter()
+        .filter(|a| matches!(a, Action::RequestBackfill { .. }))
+        .collect();
+    assert_eq!(
+        backfills.len(),
+        2,
+        "market 3's full window and the gap of 1 and 2: {backfills:?}"
+    );
+}

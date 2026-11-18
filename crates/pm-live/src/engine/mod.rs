@@ -379,13 +379,21 @@ impl Engine {
         if let Some(state) = self.slots.get_mut(slot) {
             state.connected_since = Some(now);
         }
-        let lookback = delta(self.config.volume_window) + delta(self.config.volume_slack);
-        let mut backfills: BTreeMap<(UtcMicros, UtcMicros), BTreeSet<ConditionId>> =
-            BTreeMap::new();
         for token in tokens {
             if let Some(book) = self.books.get_mut(token) {
                 book.distrust_from(Distrust::AwaitingSnapshot, now);
             }
+        }
+        self.start_live(tokens, now, actions);
+    }
+
+    /// Live prints of `tokens`' markets flow from `now`: asks for the backfill each needs (the
+    /// whole window the first time, the gap after a disconnect).
+    fn start_live(&mut self, tokens: &[TokenId], now: UtcMicros, actions: &mut Vec<Action>) {
+        let lookback = delta(self.config.volume_window) + delta(self.config.volume_slack);
+        let mut backfills: BTreeMap<(UtcMicros, UtcMicros), BTreeSet<ConditionId>> =
+            BTreeMap::new();
+        for token in tokens {
             let Some(condition) = self.token_market.get(token) else {
                 continue;
             };
@@ -506,7 +514,17 @@ impl Engine {
             match self.slots.get_mut(&slot) {
                 Some(state) => {
                     state.tokens.extend(tokens.iter().cloned());
-                    actions.push(Action::Subscribe { slot, tokens });
+                    // On a connection that is up, no `ConnUp` will follow for these tokens:
+                    // their live prints start now. (On one that is down, its next `ConnUp`
+                    // carries them.)
+                    let connected = state.connected();
+                    actions.push(Action::Subscribe {
+                        slot,
+                        tokens: tokens.clone(),
+                    });
+                    if connected {
+                        self.start_live(&tokens, now, actions);
+                    }
                 }
                 None => {
                     self.slots.insert(
