@@ -179,6 +179,9 @@ impl RegistryState {
         if let Some(fees) = info.fee_params {
             return fees;
         }
+        // A failed CLOB call keeps parameters last read from the CLOB rather than falling back,
+        // so a transient error is not a fee change.
+        let previous = self.fees.get(&info.condition_id).copied();
         match clob.fee_details(&info.condition_id).await {
             Ok(Some((rate, exponent))) => {
                 return FeeParams {
@@ -190,7 +193,10 @@ impl RegistryState {
             }
             Ok(None) => tracing::debug!(condition = %info.condition_id, "no CLOB fee details"),
             Err(error) => {
-                tracing::warn!(condition = %info.condition_id, %error, "CLOB fee lookup failed")
+                tracing::warn!(condition = %info.condition_id, error = %format!("{error:#}"), "CLOB fee lookup failed");
+                if let Some(previous) = previous.filter(|p| p.source == FeeSource::Clob) {
+                    return previous;
+                }
             }
         }
         if let Some(fees) = self.table.fallback(&info.tags, now) {

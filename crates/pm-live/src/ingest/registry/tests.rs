@@ -137,7 +137,16 @@ async fn without_a_gamma_schedule_fees_come_from_the_clob_then_the_table() {
     assert_eq!(add[0].fees.source, FeeSource::Clob);
     assert_eq!(add[0].fees.rate, dec!(0.05));
     assert_eq!(add[0].fees.seen_at, first);
-    // Next poll the CLOB fails (500): the table row in force, politics at its higher rate.
+    // The CLOB fails (500) once: its last answer stands, no change.
+    assert!(
+        state
+            .poll(&gamma, &clob, at("2026-11-19T12:00:30Z"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // It then has no fee details: the table row in force, politics at its higher rate.
+    clob.answer(Ok(None));
     let second = at("2026-11-19T12:01:00Z");
     let (_, _, changed) = unpack(state.poll(&gamma, &clob, second).await.unwrap());
     assert_eq!(changed.len(), 1);
@@ -150,7 +159,7 @@ async fn without_a_gamma_schedule_fees_come_from_the_clob_then_the_table() {
     assert_eq!(fees.seen_at, second);
     assert_eq!(
         clob.calls.load(Ordering::SeqCst),
-        2,
+        3,
         "the CLOB is asked whenever Gamma has no schedule"
     );
 }

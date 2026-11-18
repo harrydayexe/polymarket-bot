@@ -170,6 +170,19 @@ impl Event {
         })
     }
 
+    /// The slot of a market message (`Ws*` events other than `WsDropped`).
+    pub fn ws_slot(&self) -> Option<&ConnSlotId> {
+        match self {
+            Event::WsBook { slot, .. }
+            | Event::WsPriceChange { slot, .. }
+            | Event::WsTrade { slot, .. }
+            | Event::WsTickSize { slot, .. }
+            | Event::WsMarketResolved { slot, .. }
+            | Event::WsNewMarket { slot, .. } => Some(slot),
+            _ => None,
+        }
+    }
+
     /// A short name for logs and metrics.
     pub fn name(&self) -> &'static str {
         match self {

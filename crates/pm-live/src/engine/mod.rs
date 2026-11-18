@@ -44,6 +44,8 @@ pub struct SlotState {
     pub tokens: BTreeSet<TokenId>,
     /// Since when the connection has been up, if it is.
     pub connected_since: Option<UtcMicros>,
+    /// When the last market message arrived on it.
+    pub last_message_at: Option<UtcMicros>,
 }
 
 impl SlotState {
@@ -202,9 +204,16 @@ impl Engine {
         self.now = Some(now);
         let mut actions = self.fire_timers(now);
         self.counters.add("events", envelope.event.name(), 1);
+        if let Some(slot) = envelope.event.ws_slot()
+            && let Some(state) = self.slots.get_mut(slot)
+        {
+            state.last_message_at = Some(now);
+        }
         match envelope.event {
             Event::WsBook { slot, book } => self.on_book(&slot, &book, now)?,
-            Event::WsPriceChange { change, .. } => self.on_price_change(&change, now)?,
+            Event::WsPriceChange { change, .. } => {
+                self.on_price_change(&change, now, &mut actions)?
+            }
             Event::WsTrade { trade, .. } => self.on_trade(&trade, now, &mut actions),
             Event::WsTickSize { tick, .. } => {
                 if let Some(book) = self.books.get_mut(&tick.asset_id) {
@@ -246,7 +255,9 @@ impl Engine {
             }
             Event::ConnDown { slot, tokens, .. } => self.on_conn_down(&slot, &tokens, now),
             Event::ConnFailed { .. } => self.counters.add("conn_failed", "", 1),
-            Event::ConnDecodeError { slot, tokens, .. } => self.on_decode_error(slot, &tokens, now),
+            Event::ConnDecodeError { slot, tokens, .. } => {
+                self.on_decode_error(slot, &tokens, now, &mut actions)
+            }
             Event::RegistryUpdate {
                 add,
                 remove,
@@ -316,6 +327,7 @@ impl Engine {
         &mut self,
         event: &PriceChangeEvent,
         now: UtcMicros,
+        actions: &mut Vec<Action>,
     ) -> Result<(), InvariantViolation> {
         let mut by_token: BTreeMap<TokenId, Vec<LevelChange>> = BTreeMap::new();
         for change in &event.price_changes {
@@ -326,9 +338,12 @@ impl Engine {
                     .push(level),
                 Err(_) => self.counters.add("ws_bad_side", "price_change", 1),
             }
-            if self.books.contains_key(&change.asset_id) {
-                self.ordering
-                    .on_change(&change.asset_id, change.price, event.timestamp, now);
+            if self.books.contains_key(&change.asset_id)
+                && let Some(seen) =
+                    self.ordering
+                        .on_change(&change.asset_id, change.price, event.timestamp, now)
+            {
+                actions.push(observation_metric(seen));
             }
         }
         for (token, changes) in by_token {
@@ -376,15 +391,31 @@ impl Engine {
         actions: &mut Vec<Action>,
     ) {
         self.counters.add("conn_up", "", 1);
-        if let Some(state) = self.slots.get_mut(slot) {
-            state.connected_since = Some(now);
-        }
+        let Some(state) = self.slots.get_mut(slot) else {
+            // A slot closed since; its tokens are elsewhere or gone.
+            self.counters.add("stale_lifecycle", "conn_up", 1);
+            return;
+        };
+        state.connected_since = Some(now);
+        state.last_message_at = Some(now);
+        let tokens = self.own_tokens(slot, tokens);
+        let tokens = tokens.as_slice();
         for token in tokens {
             if let Some(book) = self.books.get_mut(token) {
                 book.distrust_from(Distrust::AwaitingSnapshot, now);
             }
         }
         self.start_live(tokens, now, actions);
+    }
+
+    /// The tokens of a lifecycle event that this slot carries (an event can name tokens
+    /// unsubscribed since).
+    fn own_tokens(&self, slot: &ConnSlotId, tokens: &[TokenId]) -> Vec<TokenId> {
+        tokens
+            .iter()
+            .filter(|token| self.token_slot.get(*token) == Some(slot))
+            .cloned()
+            .collect()
     }
 
     /// Live prints of `tokens`' markets flow from `now`: asks for the backfill each needs (the
@@ -420,10 +451,14 @@ impl Engine {
 
     fn on_conn_down(&mut self, slot: &ConnSlotId, tokens: &[TokenId], now: UtcMicros) {
         self.counters.add("conn_down", "", 1);
-        if let Some(state) = self.slots.get_mut(slot) {
-            state.connected_since = None;
-        }
-        for token in tokens {
+        let Some(state) = self.slots.get_mut(slot) else {
+            self.counters.add("stale_lifecycle", "conn_down", 1);
+            return;
+        };
+        state.connected_since = None;
+        // Prints may be missing since the last message, not just since the loss was noticed.
+        let last_message = state.last_message_at.map_or(now, |at| at.min(now));
+        for token in &self.own_tokens(slot, tokens) {
             if let Some(book) = self.books.get_mut(token) {
                 book.distrust_from(Distrust::Disconnected, now);
             }
@@ -432,21 +467,51 @@ impl Engine {
                 .get(token)
                 .and_then(|c| self.volumes.get_mut(c))
             {
-                volume.disconnected(now);
+                volume.disconnected(last_message);
             }
         }
     }
 
-    fn on_decode_error(&mut self, slot: ConnSlotId, tokens: &[TokenId], now: UtcMicros) {
+    fn on_decode_error(
+        &mut self,
+        slot: ConnSlotId,
+        tokens: &[TokenId],
+        now: UtcMicros,
+        actions: &mut Vec<Action>,
+    ) {
         self.counters.add("decode_errors", "", 1);
-        let carried: Vec<TokenId> = match self.slots.get(&slot) {
-            Some(state) => state.tokens.iter().cloned().collect(),
-            None => tokens.to_vec(),
+        let Some(state) = self.slots.get(&slot) else {
+            self.counters.add("stale_lifecycle", "decode_error", 1);
+            return;
         };
-        for token in carried.iter().chain(tokens) {
+        let mut carried: BTreeSet<TokenId> = state.tokens.clone();
+        carried.extend(self.own_tokens(&slot, tokens));
+        for token in &carried {
             if let Some(book) = self.books.get_mut(token) {
                 book.distrust_from(Distrust::DecodeError, now);
             }
+        }
+        // The lost message may have been a trade: refetch that moment's prints.
+        let conditions: BTreeSet<ConditionId> = carried
+            .iter()
+            .filter_map(|token| self.token_market.get(token).cloned())
+            .collect();
+        let mut backfills: BTreeMap<(UtcMicros, UtcMicros), Vec<ConditionId>> = BTreeMap::new();
+        for condition in conditions {
+            if let Some(interval) = self
+                .volumes
+                .get_mut(&condition)
+                .and_then(|volume| volume.lost_message(now))
+            {
+                backfills.entry(interval).or_default().push(condition);
+            }
+        }
+        for ((from, until), conditions) in backfills {
+            actions.push(Action::RequestBackfill {
+                conditions,
+                from,
+                until,
+            });
         }
         let due = now + delta(self.config.resnapshot_after_decode_error);
         self.schedule(due, Timer::Resnapshot { slot, since: now });
@@ -532,6 +597,7 @@ impl Engine {
                         SlotState {
                             tokens: tokens.iter().cloned().collect(),
                             connected_since: None,
+                            last_message_at: None,
                         },
                     );
                     actions.push(Action::OpenSlot { slot, tokens });

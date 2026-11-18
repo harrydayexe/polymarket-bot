@@ -45,12 +45,12 @@ pub enum DroppedKind {
     Unknown,
 }
 
-/// Maps one item of a slot's stream (spec C2, "Translate the stream"). `tokens` is the slot's
-/// current subscription, used for decode errors.
+/// Maps one item of a slot's stream (spec C2, "Translate the stream"). `tokens` gives the
+/// slot's current subscription; it is only called for decode errors.
 pub fn translate(
     slot: &ConnSlotId,
     item: marcasite::Result<ReconnectEvent>,
-    tokens: &[TokenId],
+    tokens: impl FnOnce() -> Vec<TokenId>,
 ) -> Translated {
     let event = |event| Translated::Event {
         event,
@@ -94,7 +94,7 @@ pub fn translate(
         Err(Error::WebSocket(error)) if error.kind() == WebSocketErrorKind::Decode => {
             event(Event::ConnDecodeError {
                 slot: slot.clone(),
-                tokens: tokens.to_vec(),
+                tokens: tokens(),
                 error: error.to_string(),
             })
         }
@@ -162,7 +162,7 @@ where
             Ok(ReconnectEvent::Connected { .. } | ReconnectEvent::Disconnected { .. })
         );
         let mut send = Vec::with_capacity(2);
-        match translate(&slot, item, &tokens()) {
+        match translate(&slot, item, &tokens) {
             Translated::Event {
                 event,
                 exchange_time,

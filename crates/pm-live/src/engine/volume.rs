@@ -1,11 +1,14 @@
 //! Trailing 24 h volume of each condition (§3.6), from live prints plus Data API backfills.
 //!
 //! Live prints start at `live_since`, the first time the condition's connection came up; a
-//! backfill of `[now − window − slack, live_since)` is then requested, so it always overlaps
-//! live coverage. A backfilled print is kept iff its time is in the requested interval and
-//! its transaction was not already seen live. After a disconnect, a gap backfill covers the
-//! time the connection was down. A failed backfill leaves a hole: the window is incomplete
-//! until the hole has left it.
+//! backfill of `[now − window − slack, live_since + margin)` is then requested, so it always
+//! overlaps live coverage. A backfilled print is kept iff its time is in the requested interval
+//! and its transaction was not already seen live (so overlap is harmless, and every interval
+//! gets [BACKFILL_MARGIN] either side: Data API times are whole seconds, and a loss is only
+//! noticed some time after the last message). After a disconnect, a gap backfill covers the
+//! time since the connection's last message; after a decode error (maybe a lost trade), the
+//! moment of the error. Until a backfill is merged its interval counts as missing; a failed one
+//! leaves a hole. The window is complete only when no missing interval overlaps it.
 
 use std::time::Duration;
 
@@ -33,6 +36,9 @@ pub struct MergeCounts {
     pub invalid: u64,
 }
 
+/// Added either side of every backfill interval.
+pub const BACKFILL_MARGIN: TimeDelta = TimeDelta::seconds(1);
+
 /// One condition's rolling volume and its coverage.
 #[derive(Debug, Clone)]
 pub struct ConditionVolume {
@@ -42,6 +48,8 @@ pub struct ConditionVolume {
     down_since: Option<UtcMicros>,
     /// Intervals no prints could be fetched for.
     holes: Vec<(UtcMicros, UtcMicros)>,
+    /// Backfills requested and not merged yet.
+    pending: Vec<(UtcMicros, UtcMicros)>,
 }
 
 /// A backfill the engine should request: `[from, until)`.
@@ -56,6 +64,7 @@ impl ConditionVolume {
             live_since: None,
             down_since: None,
             holes: Vec::new(),
+            pending: Vec::new(),
         })
     }
 
@@ -66,21 +75,36 @@ impl ConditionVolume {
     /// The connection carrying this condition came up at `now`. Returns the backfill to
     /// request: the full window the first time, the gap after a disconnect, else nothing.
     pub fn connected(&mut self, now: UtcMicros, lookback: TimeDelta) -> Option<BackfillInterval> {
-        match (self.live_since, self.down_since.take()) {
+        let interval = match (self.live_since, self.down_since.take()) {
             (None, _) => {
                 self.live_since = Some(now);
-                Some((now - lookback, now))
+                self.volume.mark_covered_from(now);
+                (now - lookback, now + BACKFILL_MARGIN)
             }
-            (Some(_), Some(down)) if down < now => Some((down, now)),
-            _ => None,
+            (Some(_), Some(down)) => (down - BACKFILL_MARGIN, now + BACKFILL_MARGIN),
+            (Some(_), None) => return None,
+        };
+        self.pending.push(interval);
+        Some(interval)
+    }
+
+    /// The connection was lost; its last message came at `last_message`: prints from then
+    /// until the next `connected` are missing.
+    pub fn disconnected(&mut self, last_message: UtcMicros) {
+        if self.live_since.is_some() && self.down_since.is_none() {
+            self.down_since = Some(last_message);
         }
     }
 
-    /// The connection was lost at `now`: prints until the next `connected` are missing.
-    pub fn disconnected(&mut self, now: UtcMicros) {
-        if self.live_since.is_some() && self.down_since.is_none() {
-            self.down_since = Some(now);
+    /// A message that might have been a trade was lost at `at`: the backfill to request.
+    pub fn lost_message(&mut self, at: UtcMicros) -> Option<BackfillInterval> {
+        if self.live_since.is_none() || self.down_since.is_some() {
+            // Not live yet, or already down: a backfill will cover it.
+            return None;
         }
+        let interval = (at - BACKFILL_MARGIN, at + BACKFILL_MARGIN);
+        self.pending.push(interval);
+        Some(interval)
     }
 
     /// A live print.
@@ -134,6 +158,9 @@ impl ConditionVolume {
                 Err(_) => counts.invalid += 1,
             }
         }
+        if let Some(index) = self.pending.iter().position(|&p| p == (from, until)) {
+            self.pending.swap_remove(index);
+        }
         if !complete {
             self.holes.push((from, until));
         }
@@ -154,6 +181,7 @@ impl ConditionVolume {
         let holes_clear = self
             .holes
             .iter()
+            .chain(&self.pending)
             .all(|&(from, until)| until <= start || from > at);
         let down_clear = self.down_since.is_none_or(|down| down > at);
         Ok((
@@ -167,6 +195,12 @@ impl ConditionVolume {
         self.volume.evict(now);
         let start = now - self.window;
         self.holes.retain(|&(_, until)| until > start);
+        // A backfill that never came back (its task stopped) is a hole, not pending forever.
+        let stale = now - TimeDelta::hours(1);
+        let (old, recent): (Vec<_>, Vec<_>) =
+            self.pending.iter().partition(|&&(_, until)| until < stale);
+        self.holes.extend(old);
+        self.pending = recent;
     }
 
     pub fn duplicates(&self) -> u64 {
@@ -234,11 +268,16 @@ mod tests {
         let mut v = volume();
         let now = 30 * HOUR;
         let (from, until) = v.connected(t(now), lookback()).unwrap();
-        assert_eq!(until, t(now));
+        assert_eq!(until, t(now + 1000));
+        assert!(
+            !v.total(t(now)).unwrap().1,
+            "incomplete until the backfill is merged"
+        );
         assert!(v.record_live(&live("live", dec!(10), now + 100)));
         // Newest first, as the Data API returns them.
         let rows = [
-            row("1111", dec!(0.5), dec!(10), "live", now + 100), // after live_since: outside
+            row("1111", dec!(0.5), dec!(10), "live", now + 100), // seen live
+            row("1111", dec!(0.5), dec!(1), "late", now + 1000), // after the margin: outside
             row("1111", dec!(0.5), dec!(4), "b", now - 1000),
             row("1222", dec!(0.25), dec!(8), "c", now - 2 * HOUR),
             row("1111", dec!(0.5), dec!(100), "old", now - 25 * HOUR), // before from
@@ -257,7 +296,7 @@ mod tests {
             counts,
             MergeCounts {
                 kept: 2,
-                seen_live: 0,
+                seen_live: 1,
                 outside: 2,
                 invalid: 0
             }
@@ -307,7 +346,11 @@ mod tests {
         .unwrap();
         assert!(!v.total(t(now)).unwrap().1, "the failed backfill is a hole");
         // Once the hole has left the window, live prints alone cover it.
-        assert!(v.total(t(now + 24 * HOUR + 1)).unwrap().1);
+        assert!(
+            !v.total(t(now + 24 * HOUR + 999)).unwrap().1,
+            "the hole runs to the margin"
+        );
+        assert!(v.total(t(now + 24 * HOUR + 1000)).unwrap().1);
     }
 
     #[test]
@@ -328,13 +371,18 @@ mod tests {
             v.connected(t(now + 10), lookback()).is_none(),
             "no gap, no backfill"
         );
+        // The last message came at +1 h; the loss was noticed 30 s later.
         v.disconnected(t(now + HOUR));
         assert!(
             !v.total(t(now + HOUR + 10)).unwrap().1,
             "incomplete while down"
         );
-        let gap = v.connected(t(now + HOUR + 5000), lookback()).unwrap();
-        assert_eq!(gap, (t(now + HOUR), t(now + HOUR + 5000)));
+        let gap = v.connected(t(now + HOUR + 35_000), lookback()).unwrap();
+        assert_eq!(gap, (t(now + HOUR - 1000), t(now + HOUR + 36_000)));
+        assert!(
+            !v.total(t(now + HOUR + 36_000)).unwrap().1,
+            "incomplete until the gap is merged"
+        );
         let rows = [row("1111", dec!(0.5), dec!(2), "g", now + HOUR + 1000)];
         let counts = v
             .merge_backfill(
@@ -343,12 +391,42 @@ mod tests {
                 &rows,
                 true,
                 gap,
-                t(now + HOUR + 6000),
+                t(now + HOUR + 37_000),
             )
             .unwrap();
         assert_eq!(counts.kept, 1);
-        let (total, complete) = v.total(t(now + HOUR + 6000)).unwrap();
+        let (total, complete) = v.total(t(now + HOUR + 37_000)).unwrap();
         assert_eq!(total, Usd::new(dec!(1)));
         assert!(complete);
+    }
+
+    #[test]
+    fn a_lost_message_asks_for_a_small_backfill() {
+        let mut v = volume();
+        let now = 30 * HOUR;
+        let c = ConditionId::new("0xc1");
+        assert!(v.lost_message(t(now)).is_none(), "not live yet");
+        let interval = v.connected(t(now), lookback()).unwrap();
+        v.merge_backfill(&c, &tokens(), &[], true, interval, t(now))
+            .unwrap();
+        let lost = v.lost_message(t(now + 5000)).unwrap();
+        assert_eq!(lost, (t(now + 4000), t(now + 6000)));
+        assert!(!v.total(t(now + 6000)).unwrap().1);
+        v.merge_backfill(&c, &tokens(), &[], true, lost, t(now + 7000))
+            .unwrap();
+        assert!(v.total(t(now + 7000)).unwrap().1);
+    }
+
+    #[test]
+    fn a_backfill_that_never_returns_becomes_a_hole() {
+        let mut v = volume();
+        let now = 30 * HOUR;
+        v.connected(t(now), lookback()).unwrap();
+        v.evict(t(now + 2 * HOUR));
+        assert!(!v.total(t(now + 2 * HOUR)).unwrap().1);
+        assert!(
+            v.total(t(now + 25 * HOUR)).unwrap().1,
+            "until it leaves the window"
+        );
     }
 }

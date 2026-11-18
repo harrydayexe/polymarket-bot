@@ -391,7 +391,7 @@ fn backfill_is_requested_on_first_connect_and_merged() {
         [Action::RequestBackfill {
             conditions: vec![condition(1), condition(2)],
             from: t(now) - lookback,
-            until: t(now),
+            until: t(now) + volume::BACKFILL_MARGIN,
         }]
     );
     // A live trade, then the backfill (which also reports it, stamped to the second).
@@ -425,7 +425,7 @@ fn backfill_is_requested_on_first_connect_and_merged() {
             prints: vec![print("0xaa", now), print("0xbb", now - HOUR)],
             complete: true,
             from: t(now) - lookback,
-            until: t(now),
+            until: t(now) + volume::BACKFILL_MARGIN,
         },
     );
     // 10 × 0.5 live + a sell of YES at 0.8 = a buy of NO at 0.2: 10 × 0.2.
@@ -601,7 +601,7 @@ fn markets_added_to_a_connected_slot_start_live_volume_at_once() {
     assert!(actions.contains(&Action::RequestBackfill {
         conditions: vec![condition(2)],
         from: t(HOUR) - lookback,
-        until: t(HOUR),
+        until: t(HOUR) + volume::BACKFILL_MARGIN,
     }));
     // While the slot is down, the next ConnUp starts them instead.
     h.feed(
@@ -628,4 +628,95 @@ fn markets_added_to_a_connected_slot_start_live_volume_at_once() {
         2,
         "market 3's full window and the gap of 1 and 2: {backfills:?}"
     );
+}
+
+#[test]
+fn a_trade_before_its_price_change_is_measured() {
+    let mut h = Harness::new();
+    h.add(0, &[1]);
+    h.up(10, &[yes(1), no(1)]);
+    h.snapshot(20, &yes(1));
+    h.feed(
+        SEC,
+        Event::WsTrade {
+            slot: slot(),
+            trade: trade(&condition(1), &yes(1), "BUY", "0.42", "5", "0x1", SEC),
+        },
+    );
+    let actions = h.feed(
+        SEC + 3,
+        Event::WsPriceChange {
+            slot: slot(),
+            change: price_change(&[(&yes(1), "0.42", "75", "SELL")], SEC + 2),
+        },
+    );
+    let seen = metrics(&actions, "ws_trade_vs_price_change_ms");
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].labels["order"], "trade_first");
+    assert_eq!(seen[0].value, 2.0);
+}
+
+#[test]
+fn a_decode_error_refetches_the_moment_and_a_gap_starts_at_the_last_message() {
+    let mut h = Harness::new();
+    h.add(0, &[1]);
+    let now = 30 * HOUR;
+    h.up(now, &[yes(1), no(1)]);
+    let margin = volume::BACKFILL_MARGIN;
+    let actions = h.feed(
+        now + 5 * SEC,
+        Event::ConnDecodeError {
+            slot: slot(),
+            tokens: vec![],
+            error: "bad".into(),
+        },
+    );
+    assert!(actions.contains(&Action::RequestBackfill {
+        conditions: vec![condition(1)],
+        from: t(now + 5 * SEC) - margin,
+        until: t(now + 5 * SEC) + margin,
+    }));
+    // The last message at +6 s; the loss noticed at +40 s (an idle timeout); back at +41 s.
+    h.snapshot(now + 6 * SEC, &yes(1));
+    h.feed(
+        now + 40 * SEC,
+        Event::ConnDown {
+            slot: slot(),
+            tokens: vec![yes(1), no(1)],
+            reason: None,
+        },
+    );
+    let actions = h.up(now + 41 * SEC, &[yes(1), no(1)]);
+    assert!(actions.contains(&Action::RequestBackfill {
+        conditions: vec![condition(1)],
+        from: t(now + 6 * SEC) - margin,
+        until: t(now + 41 * SEC) + margin,
+    }));
+}
+
+#[test]
+fn lifecycle_events_of_closed_slots_and_foreign_tokens_are_ignored() {
+    let mut h = Harness::new();
+    h.add(0, &[1]);
+    h.up(10, &[yes(1), no(1)]);
+    h.snapshot(20, &yes(1));
+    // A closed slot's late events change nothing.
+    let closed = ConnSlotId::new("c-0009");
+    h.feed(
+        30,
+        Event::ConnDown {
+            slot: closed.clone(),
+            tokens: vec![yes(1)],
+            reason: None,
+        },
+    );
+    h.feed(
+        40,
+        Event::ConnUp {
+            slot: closed,
+            tokens: vec![yes(1)],
+            attempt: 2,
+        },
+    );
+    assert!(h.trusted(&yes(1)));
 }
