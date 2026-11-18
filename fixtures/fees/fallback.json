@@ -1,0 +1,15 @@
+{
+  "description": "Fallback fee parameters from config/fee_schedule_history.toml (§3.7) for a market with these Gamma tag slugs at time `at`. `source` is fallback, or fallback_conservative when the tags map to several fee categories (politics: elections or not) and the highest rate in force was used. A null rate means the tags map to no fee category.",
+  "cases": [
+    { "name": "geopolitics before the change", "tags": ["geopolitics"], "at": "2026-11-20T23:58:59Z", "rate": "0", "exponent": 1, "source": "fallback" },
+    { "name": "geopolitics after the change", "tags": ["geopolitics"], "at": "2026-11-20T23:59:00Z", "rate": "0", "exponent": 1, "source": "fallback" },
+    { "name": "politics one second before the change", "tags": ["politics"], "at": "2026-11-20T23:58:59Z", "rate": "0.04", "exponent": 1, "source": "fallback_conservative" },
+    { "name": "politics at the change takes the higher (elections) rate", "tags": ["politics"], "at": "2026-11-20T23:59:00Z", "rate": "0.05", "exponent": 1, "source": "fallback_conservative" },
+    { "name": "politics and geopolitics tags: the higher rate", "tags": ["geopolitics", "politics"], "at": "2026-12-01T00:00:00Z", "rate": "0.05", "exponent": 1, "source": "fallback_conservative" },
+    { "name": "economics after the change", "tags": ["economics"], "at": "2026-12-01T00:00:00Z", "rate": "0.01", "exponent": 1, "source": "fallback" },
+    { "name": "politics before fees were introduced", "tags": ["politics"], "at": "2026-01-01T00:00:00Z", "rate": "0", "exponent": 1, "source": "fallback_conservative" },
+    { "name": "sports before and after 10 Jul", "tags": ["sports"], "at": "2026-07-09T23:59:59Z", "rate": "0.03", "exponent": 1, "source": "fallback" },
+    { "name": "sports from 10 Jul", "tags": ["sports"], "at": "2026-07-10T00:00:00Z", "rate": "0.05", "exponent": 1, "source": "fallback" },
+    { "name": "unknown tags", "tags": ["crypto", "bitcoin"], "at": "2026-12-01T00:00:00Z", "rate": null, "exponent": null, "source": null }
+  ]
+}

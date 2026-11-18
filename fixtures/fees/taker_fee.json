@@ -1,0 +1,17 @@
+{
+  "description": "Taker fee for a fill (§3.7). fee = shares × rate × (p × (1 − p))^exponent, unrounded; charged = fee rounded half-even to 5 places (D14). Decimals are strings.",
+  "cases": [
+    { "name": "docs: 100 shares at 0.50, rate 0.07", "shares": "100", "price": "0.50", "rate": "0.07", "exponent": 1, "fee": "1.75", "charged": "1.75" },
+    { "name": "politics pre-change: 100 at 0.20, rate 0.04", "shares": "100", "price": "0.20", "rate": "0.04", "exponent": 1, "fee": "0.64", "charged": "0.64" },
+    { "name": "politics other post-change: 100 at 0.20, rate 0.01", "shares": "100", "price": "0.20", "rate": "0.01", "exponent": 1, "fee": "0.16", "charged": "0.16" },
+    { "name": "geopolitics is fee-free", "shares": "100", "price": "0.50", "rate": "0", "exponent": 1, "fee": "0", "charged": "0" },
+    { "name": "crypto at 1c: exact before rounding", "shares": "100", "price": "0.01", "rate": "0.07", "exponent": 1, "fee": "0.0693", "charged": "0.0693" },
+    { "name": "tie at the 5th place rounds to even (down)", "shares": "1", "price": "0.5", "rate": "0.00002", "exponent": 1, "fee": "0.000005", "charged": "0" },
+    { "name": "tie at the 5th place rounds to even (up)", "shares": "3", "price": "0.5", "rate": "0.00002", "exponent": 1, "fee": "0.000015", "charged": "0.00002" },
+    { "name": "below half a unit rounds to zero", "shares": "1", "price": "0.99", "rate": "0.0001", "exponent": 1, "fee": "0.00000099", "charged": "0" },
+    { "name": "above half a unit rounds up", "shares": "7", "price": "0.3", "rate": "0.01", "exponent": 1, "fee": "0.0147", "charged": "0.0147" },
+    { "name": "6th place decides", "shares": "13", "price": "0.37", "rate": "0.05", "exponent": 1, "fee": "0.151515", "charged": "0.15152" },
+    { "name": "exponent 2 (unverified)", "shares": "1", "price": "0.5", "rate": "0.02", "exponent": 2, "fee": "0.00125", "charged": "0.00125" },
+    { "name": "price 1 pays nothing", "shares": "100", "price": "1", "rate": "0.04", "exponent": 1, "fee": "0", "charged": "0" }
+  ]
+}

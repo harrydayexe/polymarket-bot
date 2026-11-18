@@ -11,15 +11,17 @@
 //! | [random] | Injected randomness, including a seeded generator for reproducible runs |
 //! | [market] | Gamma markets, universe selection, the sanity check and registry planning |
 //! | [archive] | The archive's on-disk layout and line format, and a reader |
+//! | [fees] | The dated table of fee coefficients by category, the last fee fallback |
 //! | [units] | Money and probability newtypes (§3.1 of the Phase 1 spec), logits and fees |
 //! | [normalize] | Prints as buys of one outcome, grouping into sweeps, rolling pair volume |
-//! | [client] | Polymarket endpoints, shared HTTP client settings and a rate limiter |
+//! | [client] | Polymarket endpoints, client settings and the live system's request budgets |
 //! | [mod@invariant] | The error returned when an internal invariant does not hold |
 
 pub mod archive;
 pub mod book;
 pub mod client;
 pub mod clock;
+pub mod fees;
 pub mod invariant;
 pub mod market;
 pub mod normalize;

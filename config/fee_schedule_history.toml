@@ -1,0 +1,174 @@
+# Taker fee coefficients by category over time (§3.7 of the Phase 1 spec).
+#
+# One row per (category, effective_from). The row with the latest effective_from <= t applies.
+# A category with no row at or before t had no fees then (rate 0). Shared by the Rust fallback
+# (pm-core `fees`) and the Python research code (P2/P3).
+#
+# Formula: fee = shares × rate × (p × (1 − p))^exponent. Every live market has sent exponent 1.
+#
+# `verified = false` marks a row whose date or rate the docs do not pin down; P2/P3 report
+# results with and without those rows. Categories are Polymarket's fee categories; politics is
+# split into `politics_elections` and `politics_other` from the 20 Nov 2026 change, and both
+# rows exist before it (same rate) so a lookup for either works at any time.
+
+# --- Fee Structure V2 (changelog, 30 Mar 2026): fees extended to most categories. The entry
+# gives a date but no time, and the docs give no coefficients from before July other than
+# sports', so these rows are unverified. Rates are the ones /trading/fees lists before the
+# 20 Nov change.
+
+[[fee]]
+category = "geopolitics"
+effective_from = "2026-03-30T00:00:00Z"
+rate = "0"
+exponent = 1
+source = "https://docs.polymarket.com/trading/fees"
+verified = true
+
+[[fee]]
+category = "politics_elections"
+effective_from = "2026-03-30T00:00:00Z"
+rate = "0.04"
+exponent = 1
+source = "https://docs.polymarket.com/changelog (Fee Structure V2); rate from https://docs.polymarket.com/trading/fees"
+verified = false
+
+[[fee]]
+category = "politics_other"
+effective_from = "2026-03-30T00:00:00Z"
+rate = "0.04"
+exponent = 1
+source = "https://docs.polymarket.com/changelog (Fee Structure V2); rate from https://docs.polymarket.com/trading/fees"
+verified = false
+
+[[fee]]
+category = "economics"
+effective_from = "2026-03-30T00:00:00Z"
+rate = "0.05"
+exponent = 1
+source = "https://docs.polymarket.com/changelog (Fee Structure V2); rate from https://docs.polymarket.com/trading/fees"
+verified = false
+
+[[fee]]
+category = "culture"
+effective_from = "2026-03-30T00:00:00Z"
+rate = "0.05"
+exponent = 1
+source = "https://docs.polymarket.com/changelog (Fee Structure V2); rate from https://docs.polymarket.com/trading/fees"
+verified = false
+
+[[fee]]
+category = "finance"
+effective_from = "2026-03-30T00:00:00Z"
+rate = "0.04"
+exponent = 1
+source = "https://docs.polymarket.com/changelog (Fee Structure V2); rate from https://docs.polymarket.com/trading/fees"
+verified = false
+
+[[fee]]
+category = "tech"
+effective_from = "2026-03-30T00:00:00Z"
+rate = "0.04"
+exponent = 1
+source = "https://docs.polymarket.com/changelog (Fee Structure V2); rate from https://docs.polymarket.com/trading/fees"
+verified = false
+
+[[fee]]
+category = "other"
+effective_from = "2026-03-30T00:00:00Z"
+rate = "0.05"
+exponent = 1
+source = "https://docs.polymarket.com/changelog (Fee Structure V2); rate from https://docs.polymarket.com/trading/fees"
+verified = false
+
+# --- Sports (changelog, 10 Jul 2026): 0.03 → 0.05 at midnight UTC. The 0.03 row's start is
+# the Fee Structure V2 date (sports had fees on some leagues from 18 Feb).
+
+[[fee]]
+category = "sports"
+effective_from = "2026-03-30T00:00:00Z"
+rate = "0.03"
+exponent = 1
+source = "https://docs.polymarket.com/changelog"
+verified = false
+
+[[fee]]
+category = "sports"
+effective_from = "2026-07-10T00:00:00Z"
+rate = "0.05"
+exponent = 1
+source = "https://docs.polymarket.com/changelog"
+verified = true
+
+# --- The 20 Nov 2026 change ("Upcoming Fee and Rebate Changes"), 23:59 UTC.
+
+[[fee]]
+category = "geopolitics"
+effective_from = "2026-11-20T23:59:00Z"
+rate = "0"
+exponent = 1
+source = "https://docs.polymarket.com/programs/fee-and-rebate-changes-november-2026"
+verified = true
+
+[[fee]]
+category = "politics_elections"
+effective_from = "2026-11-20T23:59:00Z"
+rate = "0.05"
+exponent = 1
+source = "https://docs.polymarket.com/programs/fee-and-rebate-changes-november-2026"
+verified = true
+
+[[fee]]
+category = "politics_other"
+effective_from = "2026-11-20T23:59:00Z"
+rate = "0.01"
+exponent = 1
+source = "https://docs.polymarket.com/programs/fee-and-rebate-changes-november-2026"
+verified = true
+
+[[fee]]
+category = "economics"
+effective_from = "2026-11-20T23:59:00Z"
+rate = "0.01"
+exponent = 1
+source = "https://docs.polymarket.com/programs/fee-and-rebate-changes-november-2026"
+verified = true
+
+[[fee]]
+category = "culture"
+effective_from = "2026-11-20T23:59:00Z"
+rate = "0.01"
+exponent = 1
+source = "https://docs.polymarket.com/programs/fee-and-rebate-changes-november-2026"
+verified = true
+
+[[fee]]
+category = "finance"
+effective_from = "2026-11-20T23:59:00Z"
+rate = "0.05"
+exponent = 1
+source = "https://docs.polymarket.com/programs/fee-and-rebate-changes-november-2026"
+verified = true
+
+[[fee]]
+category = "tech"
+effective_from = "2026-11-20T23:59:00Z"
+rate = "0.05"
+exponent = 1
+source = "https://docs.polymarket.com/programs/fee-and-rebate-changes-november-2026"
+verified = true
+
+[[fee]]
+category = "other"
+effective_from = "2026-11-20T23:59:00Z"
+rate = "0.05"
+exponent = 1
+source = "https://docs.polymarket.com/programs/fee-and-rebate-changes-november-2026"
+verified = true
+
+[[fee]]
+category = "sports"
+effective_from = "2026-11-20T23:59:00Z"
+rate = "0.05"
+exponent = 1
+source = "https://docs.polymarket.com/programs/fee-and-rebate-changes-november-2026"
+verified = true
