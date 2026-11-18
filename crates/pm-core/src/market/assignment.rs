@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use marcasite::types::TokenId;
 
-use crate::{connection_manager::types::ConnSlotId, market_registry::token_changes::MarketTokens};
+use crate::{archive::record::ConnSlotId, market::token_changes::MarketTokens};
 
 /// Which connection slot carries each token.
 ///

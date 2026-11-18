@@ -103,6 +103,12 @@ impl PairVolume {
         true
     }
 
+    /// Whether a print of transaction `hash` (on either token) is held: lets a caller drop a
+    /// backfilled print that was already fed in live.
+    pub fn has_hash(&self, hash: &TxHash) -> bool {
+        self.first_token.contains_key(hash)
+    }
+
     /// Notes that every print from `from` on has been, or will be, fed in (after a complete
     /// backfill, or from the moment live prints started if there was none). Keeps the
     /// earliest such time.
@@ -252,6 +258,8 @@ mod tests {
         )));
         assert_eq!(v.total(t(0)).unwrap(), Usd::new(dec!(8.1)));
         assert_eq!(v.duplicates(), 2);
+        assert!(v.has_hash(&TxHash::new("a")));
+        assert!(!v.has_hash(&TxHash::new("b")));
     }
 
     #[test]
